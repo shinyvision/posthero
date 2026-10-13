@@ -36,7 +36,26 @@ func (c *Copy) fetch(ctx context.Context, api *postman.Client) (*remote, error) 
 	if err != nil {
 		return nil, err
 	}
+	// What didn't change since the base is the base's; the rest is
+	// fetched.
 	r := &remote{cols: map[string]Remote{}, envs: map[string]RemoteEnv{}}
+	var getCols, getEnvs []postman.Summary
+	c.mu.Lock()
+	for _, sum := range sums {
+		if b := c.base.Cols[sum.ID]; b != nil && b.UpdatedAt == sum.UpdatedAt && !fresh[sum.ID] {
+			r.cols[sum.ID] = Remote{UID: sum.UID, UpdatedAt: sum.UpdatedAt, Data: b.tree()}
+		} else {
+			getCols = append(getCols, sum)
+		}
+	}
+	for _, sum := range envSums {
+		if b := c.base.Envs[sum.ID]; b != nil && b.UpdatedAt == sum.UpdatedAt && !fresh[sum.ID] {
+			r.envs[sum.ID] = RemoteEnv{UID: sum.UID, UpdatedAt: sum.UpdatedAt, Data: b.Env.Clone()}
+		} else {
+			getEnvs = append(getEnvs, sum)
+		}
+	}
+	c.mu.Unlock()
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	var errs []error
@@ -54,14 +73,7 @@ func (c *Copy) fetch(ctx context.Context, api *postman.Client) (*remote, error) 
 			}
 		}()
 	}
-	c.mu.Lock()
-	base := c.base
-	c.mu.Unlock()
-	for _, sum := range sums {
-		if b := base.Cols[sum.ID]; b != nil && b.UpdatedAt == sum.UpdatedAt && !fresh[sum.ID] {
-			r.cols[sum.ID] = Remote{UID: sum.UID, UpdatedAt: sum.UpdatedAt, Data: b.tree()}
-			continue
-		}
+	for _, sum := range getCols {
 		get(func() error {
 			col, err := api.Collection(ctx, sum.UID)
 			if err != nil {
@@ -73,11 +85,7 @@ func (c *Copy) fetch(ctx context.Context, api *postman.Client) (*remote, error) 
 			return nil
 		})
 	}
-	for _, sum := range envSums {
-		if b := base.Envs[sum.ID]; b != nil && b.UpdatedAt == sum.UpdatedAt && !fresh[sum.ID] {
-			r.envs[sum.ID] = RemoteEnv{UID: sum.UID, UpdatedAt: sum.UpdatedAt, Data: b.Env.Clone()}
-			continue
-		}
+	for _, sum := range getEnvs {
 		get(func() error {
 			e, err := api.Environment(ctx, sum.UID)
 			if err != nil {
