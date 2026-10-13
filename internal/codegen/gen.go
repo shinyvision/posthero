@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -62,6 +63,12 @@ func shellQuote(s string) string {
 		return s
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// printfArg writes a printf command that prints s: a shell word can't hold
+// a NUL, so %b's escapes write it (and CRs, to be seen).
+func printfArg(s string) string {
+	return "printf '%b' " + shellQuote(strings.NewReplacer(`\`, `\\`, "\r", `\r`, "\x00", `\0000`).Replace(s))
 }
 
 func bodyText(p *send.Prepared) string {
@@ -193,6 +200,7 @@ func curl(p *send.Prepared, headers []send.Header) string {
 		first += "-X " + shellQuote(p.Method) + " "
 	}
 	parts := []string{first + shellQuote(p.URL)}
+	pre := ""
 	fields, multipart := formFields(p)
 	multipart = multipart && isMultipart(p) && p.BodyFile == ""
 	for _, h := range headers {
@@ -212,6 +220,9 @@ func curl(p *send.Prepared, headers []send.Header) string {
 		for _, f := range fields {
 			parts = append(parts, curlFormArg(f))
 		}
+	case bytes.IndexByte(p.Body, 0) >= 0:
+		parts = append(parts, "--data-binary @-")
+		pre = printfArg(string(p.Body)) + " | "
 	case len(p.Body) > 0:
 		parts = append(parts, "--data-raw "+shellQuote(string(p.Body)))
 	}
@@ -224,7 +235,7 @@ func curl(p *send.Prepared, headers []send.Header) string {
 	if p.Settings.FollowRedirects {
 		parts = append(parts, "-L")
 	}
-	return strings.Join(parts, " \\\n  ")
+	return pre + strings.Join(parts, " \\\n  ")
 }
 
 // httpieItem escapes what HTTPie reads as a separator (: = @ ;) in a
@@ -279,10 +290,51 @@ func httpie(p *send.Prepared, headers []send.Header) string {
 	case multipart:
 	case p.BodyFile != "":
 		out += " < " + shellQuote(p.BodyFile)
+	case bytes.IndexByte(p.Body, 0) >= 0:
+		out = printfArg(string(p.Body)) + " | " + out
 	case len(p.Body) > 0:
 		out = "printf '%s' " + shellQuote(string(p.Body)) + " | " + out
 	}
 	return out
+}
+
+// wgetForm writes the shell that puts a form with files together in the
+// file $body: wget can't write a form, and the files' bytes can't go in a
+// shell word, so they are read from where they are. ok is false when the
+// form has no files, or its body can't be split into its parts.
+func wgetForm(p *send.Prepared) (string, bool) {
+	fields, ok := formFields(p)
+	if !ok || !isMultipart(p) || !slices.ContainsFunc(fields, func(f formField) bool { return f.filename != "" }) {
+		return "", false
+	}
+	_, params, _ := mime.ParseMediaType(p.Get("Content-Type"))
+	delim := []byte("--" + params["boundary"])
+	body := p.Body
+	if !bytes.HasPrefix(body, delim) {
+		return "", false
+	}
+	// Each part: the delimiter, its headers, a blank line, its data; the
+	// next delimiter follows a CRLF.
+	cmds := []string{"body=$(mktemp)", "{"}
+	from, at := 0, len(delim)
+	for _, f := range fields {
+		head := bytes.Index(body[at:], []byte("\r\n\r\n"))
+		if head < 0 {
+			return "", false
+		}
+		start := at + head + 4
+		n := bytes.Index(body[start:], append([]byte("\r\n"), delim...))
+		if n < 0 {
+			return "", false
+		}
+		if f.filename != "" {
+			cmds = append(cmds, "  "+printfArg(string(body[from:start])), "  cat "+shellQuote(f.file))
+			from = start + n
+		}
+		at = start + n + 2 + len(delim)
+	}
+	cmds = append(cmds, "  "+printfArg(string(body[from:])), `} > "$body"`)
+	return strings.Join(cmds, "\n") + "\n", true
 }
 
 func wget(p *send.Prepared, headers []send.Header) string {
@@ -290,9 +342,17 @@ func wget(p *send.Prepared, headers []send.Header) string {
 	for _, h := range headers {
 		parts = append(parts, "--header="+shellQuote(h.Name+": "+h.Value))
 	}
+	form, isForm := wgetForm(p)
+	pre := ""
 	switch {
 	case p.BodyFile != "":
 		parts = append(parts, "--body-file="+shellQuote(p.BodyFile))
+	case isForm:
+		pre = form
+		parts = append(parts, `--body-file="$body"`)
+	case bytes.IndexByte(p.Body, 0) >= 0:
+		pre = "body=$(mktemp)\n" + printfArg(string(p.Body)) + ` > "$body"` + "\n"
+		parts = append(parts, `--body-file="$body"`)
 	case len(p.Body) > 0:
 		parts = append(parts, "--body-data="+shellQuote(string(p.Body)))
 	}
@@ -303,7 +363,7 @@ func wget(p *send.Prepared, headers []send.Header) string {
 		parts = append(parts, "--max-redirect=0")
 	}
 	parts = append(parts, shellQuote(p.URL))
-	return strings.Join(parts, " \\\n  ")
+	return pre + strings.Join(parts, " \\\n  ")
 }
 
 // jsString writes a JavaScript string literal: the characters that print

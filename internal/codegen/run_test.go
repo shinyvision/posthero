@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -78,6 +79,7 @@ func TestSnippetsRun(t *testing.T) {
 		{raw("crlf", "PUT", srv.URL+"/b", "line one\r\nline two\r\n\a`end`\u2028é"), dir},
 		{raw("head", "HEAD", srv.URL+"/c", ""), dir},
 		{raw("get", "GET", srv.URL+"/d?x=%20y", ""), dir},
+		{raw("nul", "POST", srv.URL+"/n", "a\x00b\\0 %s\r\n"), dir},
 		{&postman.Item{Name: "file", Request: &postman.Request{Method: "POST", URL: &postman.URL{Raw: srv.URL + "/e"},
 			Body: &postman.Body{Mode: "file", File: &postman.BodyFile{Src: "blob.bin"}}}}, dir},
 		{&postman.Item{Name: "urlencoded", Request: &postman.Request{Method: "PATCH", URL: &postman.URL{Raw: srv.URL + "/f"},
@@ -120,10 +122,6 @@ func TestSnippetsRun(t *testing.T) {
 				t.Errorf("%s %s: nothing arrived\n%s", lang, c.it.Name, code)
 				continue
 			}
-			if lang == "python" || lang == "httpie" {
-				// urllib3 encodes [ ] { } in the query itself.
-				got.uri = strings.NewReplacer("%5B", "[", "%5D", "]", "%7B", "{", "%7D", "}").Replace(got.uri)
-			}
 			compare(t, lang, c.it.Name, p, got, code)
 		}
 	}
@@ -132,8 +130,13 @@ func TestSnippetsRun(t *testing.T) {
 func compare(t *testing.T, lang, name string, p *send.Prepared, got *received, code string) {
 	t.Helper()
 	what := lang + " " + name
-	uri := p.URL[strings.Index(p.URL[len("http://"):], "/")+len("http://"):]
-	if got.method != p.Method || got.uri != uri {
+	uri, gotURI := p.URL[strings.Index(p.URL[len("http://"):], "/")+len("http://"):], got.uri
+	if lang == "python" || lang == "httpie" || lang == "wget" {
+		// urllib3 and wget escape the URL their own way (wget's changes
+		// by version): [ ] { } ' may arrive escaped or not.
+		uri, gotURI = unescaped(uri), unescaped(gotURI)
+	}
+	if got.method != p.Method || gotURI != uri {
 		t.Errorf("%s: got %s %s, want %s %s\n%s", what, got.method, got.uri, p.Method, uri, code)
 	}
 	body := p.Body
@@ -166,6 +169,23 @@ func compare(t *testing.T, lang, name string, p *send.Prepared, got *received, c
 	if strings.Join(want, "\n---\n") != strings.Join(gotParts, "\n---\n") {
 		t.Errorf("%s: form\n got %q\nwant %q\n%s", what, gotParts, want, code)
 	}
+}
+
+// unescaped undoes a URI's escapes, but for those of the delimiters of its
+// path and query, which change what it means.
+func unescaped(uri string) string {
+	var b strings.Builder
+	for i := 0; i < len(uri); i++ {
+		if uri[i] == '%' && i+2 < len(uri) {
+			if c, err := strconv.ParseUint(uri[i+1:i+3], 16, 8); err == nil && !strings.ContainsRune("%&+;=?#/", rune(c)) {
+				b.WriteByte(byte(c))
+				i += 2
+				continue
+			}
+		}
+		b.WriteByte(uri[i])
+	}
+	return b.String()
 }
 
 // parts writes out the parts of a multipart body, boundary left out.
