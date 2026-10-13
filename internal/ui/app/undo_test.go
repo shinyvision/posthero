@@ -166,7 +166,7 @@ func TestUndoEveryChange(t *testing.T) {
 				d.waitFor("200 OK")
 				d.m.focusPane(paneTree)
 				d.keys(":example Ten products<CR>")
-				d.waitFor("saved the example Ten products")
+				d.waitFor("saved Ten products as an example of List products")
 			},
 			changed: func(d *driver) bool { return exampleNamed(d, "List products", "Ten products") },
 			back:    func(d *driver) bool { return !exampleNamed(d, "List products", "Ten products") },

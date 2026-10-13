@@ -142,7 +142,18 @@ var shopCollection = `{
               "host": ["{{baseUrl}}"], "path": ["api", "products"],
               "query": [{"key": "limit", "value": "{{pageSize}}"}, {"key": "q", "value": "", "disabled": true, "description": "search in the names"}]
             }
-          }
+          },
+          "response": [
+            {
+              "name": "Search for desks",
+              "originalRequest": {"method": "GET", "header": [{"key": "Accept", "value": "application/json"}],
+                "url": {"raw": "{{baseUrl}}/api/products?limit={{pageSize}}&q=desk", "host": ["{{baseUrl}}"], "path": ["api", "products"],
+                  "query": [{"key": "limit", "value": "{{pageSize}}"}, {"key": "q", "value": "desk"}]}},
+              "status": "OK", "code": 200, "_postman_previewlanguage": "json",
+              "header": [{"key": "Content-Type", "value": "application/json; charset=utf-8"}, {"key": "X-Total-Count", "value": "8"}],
+              "body": "[{\"id\":\"p-1005\",\"name\":\"Desk lamp\",\"price\":45,\"stock\":22},{\"id\":\"p-1008\",\"name\":\"Standing desk\",\"price\":499,\"stock\":2}]"
+            }
+          ]
         },
         {
           "name": "Get product",
@@ -166,6 +177,13 @@ var shopCollection = `{
               "status": "OK", "code": 200, "_postman_previewlanguage": "json",
               "header": [{"key": "Content-Type", "value": "application/json"}],
               "body": "{\n  \"id\": \"p-1001\",\n  \"name\": \"Mechanical keyboard\",\n  \"price\": 129.0,\n  \"stock\": 14\n}"
+            },
+            {
+              "name": "No such product",
+              "originalRequest": {"method": "GET", "header": [], "url": {"raw": "{{baseUrl}}/api/products/p-9999", "host": ["{{baseUrl}}"], "path": ["api", "products", "p-9999"]}},
+              "status": "Not Found", "code": 404, "_postman_previewlanguage": "json",
+              "header": [{"key": "Content-Type", "value": "application/json; charset=utf-8"}],
+              "body": "{\n  \"error\": \"Not Found\",\n  \"message\": \"no product p-9999\"\n}"
             }
           ]
         }

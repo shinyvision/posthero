@@ -11,19 +11,51 @@ import (
 	"github.com/shinyvision/posthero/internal/editor/launch"
 	"github.com/shinyvision/posthero/internal/editor/runtime"
 	"github.com/shinyvision/posthero/internal/mouse"
-	"github.com/shinyvision/posthero/internal/postman"
 	"github.com/shinyvision/posthero/internal/reqdoc"
 	"github.com/shinyvision/posthero/internal/ui/theme"
 )
 
-// openRequest is the request in the editor.
-type openRequest struct {
+// docRef names a document the editor holds: a request, or one of its
+// saved examples.
+type docRef struct {
 	colID, itemID string
-	file          string
+	// exID is the example's id; "" is the request itself.
+	exID string
+}
+
+// id is what the document is kept by: drafts, marks, sends and the
+// history go by the request's id, or the example's.
+func (r docRef) id() string {
+	if r.exID != "" {
+		return r.exID
+	}
+	return r.itemID
+}
+
+// String is how the state file remembers the document.
+func (r docRef) String() string {
+	s := r.colID + "/" + r.itemID
+	if r.exID != "" {
+		s += "/" + r.exID
+	}
+	return s
+}
+
+// parseRef reads a docRef's String.
+func parseRef(s string) docRef {
+	col, rest, _ := strings.Cut(s, "/")
+	item, ex, _ := strings.Cut(rest, "/")
+	return docRef{colID: col, itemID: item, exID: ex}
+}
+
+// openRequest is the document in the editor: a request or an example.
+type openRequest struct {
+	docRef
+	file string
 }
 
 // editorPane is the request pane: the user's editor, one buffer per
-// request.
+// request (and per example).
 type editorPane struct {
 	m        *Model
 	backend  editor.Backend
@@ -31,14 +63,14 @@ type editorPane struct {
 	dir      string
 	runtime  string
 	w, h     int
-	// files maps buffer files to "collection/item".
-	files map[string]string
+	// files maps buffer files to their documents.
+	files map[string]docRef
 	// loaded are the files the editor has opened.
 	loaded map[string]bool
 	// texts are the buffers' texts as last reported.
 	texts map[string]string
 	// bases are the versions (updatedAt) of the requests in Postman the
-	// buffers were loaded from, by item id.
+	// buffers were loaded from, by document id.
 	bases map[string]string
 	// started says the backend was started (or tried).
 	started bool
@@ -48,7 +80,7 @@ type editorPane struct {
 }
 
 func newEditorPane(m *Model) *editorPane {
-	return &editorPane{m: m, files: map[string]string{}, loaded: map[string]bool{}, texts: map[string]string{}, bases: map[string]string{}}
+	return &editorPane{m: m, files: map[string]docRef{}, loaded: map[string]bool{}, texts: map[string]string{}, bases: map[string]string{}}
 }
 
 // editorEvent is something the editor did.
@@ -98,7 +130,7 @@ func (p *editorPane) start(w, h int) tea.Cmd {
 	p.loaded[first] = true
 	if p.m.open != nil {
 		// Reopened after a restart: back to the request, with its draft.
-		if d, ok := p.m.drafts.get(p.m.open.itemID); ok {
+		if d, ok := p.m.drafts.get(p.m.open.id()); ok {
 			b.Open(p.m.open.file, &d)
 		}
 		p.m.refreshHints()
@@ -129,21 +161,21 @@ func (p *editorPane) close() {
 	}
 }
 
-// fileFor is the buffer file of a request.
-func (p *editorPane) fileFor(colID, itemID string) string {
+// fileFor is the buffer file of a document.
+func (p *editorPane) fileFor(ref docRef) string {
 	name := strings.Map(func(r rune) rune {
 		if r == '/' || r == '\\' || r == ':' || r == ' ' {
 			return '_'
 		}
 		return r
-	}, itemID)
+	}, ref.id())
 	f := filepath.Join(p.dir, name+reqdoc.Ext)
-	p.files[f] = colID + "/" + itemID
+	p.files[f] = ref
 	return f
 }
 
-// owner is the collection and item of a buffer file.
-func (p *editorPane) owner(file string) (colID, itemID string, ok bool) {
+// owner is the document of a buffer file.
+func (p *editorPane) owner(file string) (docRef, bool) {
 	ref, ok := p.files[file]
 	if !ok {
 		// Neovim may give the file another spelling (a resolved link).
@@ -154,11 +186,7 @@ func (p *editorPane) owner(file string) (colID, itemID string, ok bool) {
 			}
 		}
 	}
-	if !ok {
-		return "", "", false
-	}
-	colID, itemID, _ = strings.Cut(ref, "/")
-	return colID, itemID, true
+	return ref, ok
 }
 
 // writeIfChanged writes a buffer's file, unless it already holds the text:
@@ -176,18 +204,18 @@ func sameFile(a, b string) bool {
 	return err1 == nil && err2 == nil && os.SameFile(fa, fb)
 }
 
-// open shows a request in the editor: what Postman has, or its draft.
-func (p *editorPane) open(colID string, it *postman.Item) {
+// open shows a document in the editor: what Postman has (doc, at version
+// base), or its draft.
+func (p *editorPane) open(ref docRef, doc, base string) {
 	if p.dir == "" {
 		dir, err := os.MkdirTemp("", "posthero-")
 		if err == nil {
 			p.dir = dir
 		}
 	}
-	file := p.fileFor(colID, it.ID)
-	doc := reqdoc.Render(it)
+	file := p.fileFor(ref)
 	var draft *string
-	if d, ok := p.m.drafts.get(it.ID); ok && d != strings.TrimSuffix(doc, "\n") {
+	if d, ok := p.m.drafts.get(ref.id()); ok && d != strings.TrimSuffix(doc, "\n") {
 		draft = &d
 	}
 	// Without a draft, the buffer shows the request as Postman has it now,
@@ -196,9 +224,9 @@ func (p *editorPane) open(colID string, it *postman.Item) {
 	if draft == nil {
 		stale = p.loaded[file] && p.texts[file] != "" && p.texts[file] != strings.TrimSuffix(doc, "\n")
 		writeIfChanged(file, doc)
-		p.bases[it.ID] = it.UpdatedAt
+		p.bases[ref.id()] = base
 	}
-	p.m.open = &openRequest{colID: colID, itemID: it.ID, file: file}
+	p.m.open = &openRequest{docRef: ref, file: file}
 	if p.backend != nil {
 		p.backend.Open(file, draft)
 		if stale {
@@ -209,42 +237,43 @@ func (p *editorPane) open(colID string, it *postman.Item) {
 	}
 }
 
-// baseOf is the version of a request its buffer was loaded from.
-func (p *editorPane) baseOf(it *postman.Item) string {
-	if b := p.bases[it.ID]; b != "" {
+// baseOf is the version of a document its buffer was loaded from, or
+// else now (Postman's version now).
+func (p *editorPane) baseOf(id, now string) string {
+	if b := p.bases[id]; b != "" {
 		return b
 	}
-	return it.UpdatedAt
+	return now
 }
 
-// changedOnServer updates a request's buffer after Postman changed it: a
-// buffer without changes reads the new text.
-func (p *editorPane) changedOnServer(colID string, it *postman.Item) {
-	file := p.fileFor(colID, it.ID)
+// changedOnServer updates a document's buffer after Postman changed it (to
+// doc, at version base): a buffer without changes reads the new text.
+func (p *editorPane) changedOnServer(ref docRef, doc, base string) {
+	file := p.fileFor(ref)
 	if !p.loaded[file] {
 		return
 	}
-	if _, draft := p.m.drafts.get(it.ID); draft {
+	if _, draft := p.m.drafts.get(ref.id()); draft {
 		return
 	}
-	writeIfChanged(file, reqdoc.Render(it))
-	p.bases[it.ID] = it.UpdatedAt
+	writeIfChanged(file, doc)
+	p.bases[ref.id()] = base
 	delete(p.texts, file)
 	if p.backend != nil {
 		p.backend.Reload(file)
 	}
 }
 
-// text is the current text of the open request: its buffer's as last
-// reported, its draft, or what Postman has.
-func (p *editorPane) text(colID, itemID string, it *postman.Item) string {
-	if d, ok := p.m.drafts.get(itemID); ok {
+// text is the current text of a document: its draft, its buffer's as last
+// reported, or what Postman has (doc).
+func (p *editorPane) text(ref docRef, doc string) string {
+	if d, ok := p.m.drafts.get(ref.id()); ok {
 		return d
 	}
-	if t, ok := p.texts[p.fileFor(colID, itemID)]; ok {
+	if t, ok := p.texts[p.fileFor(ref)]; ok {
 		return t
 	}
-	return strings.TrimSuffix(reqdoc.Render(it), "\n")
+	return strings.TrimSuffix(doc, "\n")
 }
 
 // event handles what the editor did.
@@ -267,7 +296,7 @@ func (p *editorPane) event(msg editorEvent) tea.Cmd {
 		p.loaded = map[string]bool{}
 		cmd := p.ensure()
 		if m.open != nil && p.backend != nil {
-			if d, ok := m.drafts.get(m.open.itemID); ok {
+			if d, ok := m.drafts.get(m.open.id()); ok {
 				p.backend.Open(m.open.file, &d)
 			} else {
 				p.backend.Open(m.open.file, nil)
@@ -283,39 +312,39 @@ func (p *editorPane) event(msg editorEvent) tea.Cmd {
 	case editor.Changed:
 		cmd := p.wait()
 		p.texts[ev.File] = ev.Text
-		colID, itemID, ok := p.owner(ev.File)
+		ref, ok := p.owner(ev.File)
 		if !ok {
 			return cmd
 		}
-		m.trackDraft(colID, itemID, ev.Text)
+		m.trackDraft(ref, ev.Text)
 		m.refreshHints()
 		return cmd
 	case editor.Written:
 		cmd := p.wait()
 		p.texts[ev.File] = ev.Text
-		colID, itemID, ok := p.owner(ev.File)
+		ref, ok := p.owner(ev.File)
 		if !ok {
 			return cmd
 		}
-		return tea.Batch(cmd, m.saveRequest(colID, itemID, ev.Text))
+		return tea.Batch(cmd, m.saveDoc(ref, ev.Text))
 	case editor.Send:
 		cmd := p.wait()
 		text := strings.Join(ev.Lines, "\n")
 		p.texts[ev.File] = text
-		colID, itemID, ok := p.owner(ev.File)
+		ref, ok := p.owner(ev.File)
 		if !ok {
 			m.setStatus("open a request first (⏎ in the tree, or ctrl+p)", true)
 			return cmd
 		}
-		m.trackDraft(colID, itemID, text)
-		return tea.Batch(cmd, m.sendText(colID, itemID, text))
+		m.trackDraft(ref, text)
+		return tea.Batch(cmd, m.sendDoc(ref, text))
 	case editor.Hover:
 		cmd := p.wait()
-		colID, _, ok := p.owner(ev.File)
+		ref, ok := p.owner(ev.File)
 		if !ok {
 			return cmd
 		}
-		return tea.Batch(cmd, m.hover(colID, ev))
+		return tea.Batch(cmd, m.hover(ref.colID, ev))
 	case editor.WinCmd:
 		cmd := p.wait()
 		return tea.Batch(cmd, m.wincmd(ev.Key))

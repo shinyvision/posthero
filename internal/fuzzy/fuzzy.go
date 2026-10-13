@@ -80,6 +80,18 @@ func score(words []string, text string) (Match, bool) {
 		m.Runes = append(m.Runes, pos...)
 	}
 	sort.Ints(m.Runes)
+	// Several words found as typed, together, beat the same words apart:
+	// "a product" is the example "A product" before "Get product" (whose
+	// URL has an a).
+	if len(words) > 1 {
+		phrase, hay := strings.Join(words, " "), strings.Join(strings.Fields(text), " ")
+		if !hasUpper(phrase) {
+			phrase, hay = strings.ToLower(phrase), strings.ToLower(hay)
+		}
+		if strings.Contains(hay, phrase) {
+			m.Score += 30 * len(words)
+		}
+	}
 	// Shorter candidates win ties: "Done" beats "Done (old)" for "done".
 	m.Score -= len(runes) / 8
 	return m, true

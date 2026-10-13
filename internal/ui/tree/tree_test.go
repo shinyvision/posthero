@@ -271,3 +271,191 @@ func TestViewTiny(t *testing.T) {
 		}
 	}
 }
+
+// withExamples is the shop with examples saved for Get product.
+func withExamples() []*store.Col {
+	cols := shop()
+	get := cols[0].Data.Item[0].Item[1]
+	get.Response = []*postman.Response{
+		{ID: "e1", Name: "A product", Code: 200, Status: "OK"},
+		{ID: "e2", Name: "No such product", Code: 404, Status: "Not Found"},
+	}
+	return cols
+}
+
+// A request's examples fold under it: h and l, za, Tab and the capitals
+// open and close them; ⏎ and l on one open it, h goes up to its request.
+func TestExamplesFoldUnderTheirRequest(t *testing.T) {
+	m := New([]string{"c1", "f1"})
+	m.SetData(withExamples())
+	if got := strings.Join(names(m), "|"); strings.Contains(got, "A product") {
+		t.Fatalf("examples showed folded: %q", got)
+	}
+	view := ansi.Strip(strings.Join(m.View(50, 12, true), "\n"))
+	if !strings.Contains(view, theme.Collapsed+"GET  Get product 2") {
+		t.Fatalf("a request with examples:\n%s", view)
+	}
+	m.Select("r2")
+	keys(m, "z", "a")
+	want := "Shop API| Products|  List products|  Get product|   A product|   No such product| Orders| Locations| Delete location"
+	if got := strings.Join(names(m), "|"); got != want {
+		t.Fatalf("open: %q", got)
+	}
+	view = ansi.Strip(strings.Join(m.View(50, 12, true), "\n"))
+	if !strings.Contains(view, theme.Expanded+"GET  Get product 2") || !strings.Contains(view, "e.g. A product") || !strings.Contains(view, "e.g. No such product") {
+		t.Fatalf("view:\n%s", view)
+	}
+	// The status an example has shows on its row.
+	for _, l := range strings.Split(view, "\n") {
+		if strings.Contains(l, "No such product") && !strings.HasSuffix(strings.TrimRight(l, " "), "404") {
+			t.Errorf("no status: %q", l)
+		}
+	}
+	keys(m, "j")
+	if n := m.Current(); n.Kind != Example || n.ID() != "e1" || n.Item.ID != "r2" || n.Path() != "Shop API / Products / Get product / A product" {
+		t.Fatalf("on %+v", n)
+	}
+	if a := m.Key("<CR>"); a != Open {
+		t.Errorf("⏎ on an example: %v", a)
+	}
+	if a := m.Key("l"); a != Open {
+		t.Errorf("l on an example: %v", a)
+	}
+	keys(m, "h")
+	if n := m.Current(); n.ID() != "r2" {
+		t.Fatalf("h went to %s", n.Name())
+	}
+	keys(m, "h")
+	if strings.Contains(strings.Join(names(m), "|"), "A product") || m.Current().ID() != "r2" {
+		t.Fatalf("h on an open request: %q on %s", names(m), m.Current().Name())
+	}
+	keys(m, "<Tab>")
+	if !strings.Contains(strings.Join(names(m), "|"), "A product") {
+		t.Fatalf("Tab: %q", names(m))
+	}
+	keys(m, "j", "z", "c")
+	if n := m.Current(); n.ID() != "r2" || strings.Contains(strings.Join(names(m), "|"), "A product") {
+		t.Fatalf("zc on an example: %q on %s", names(m), n.Name())
+	}
+	// za on a request without examples still folds its folder.
+	keys(m, "k", "z", "a")
+	if n := m.Current(); n.ID() != "f1" {
+		t.Fatalf("za on List products went to %s", n.Name())
+	}
+	// zR opens everything, examples too; zM closes it all.
+	keys(m, "z", "R")
+	if !strings.Contains(strings.Join(names(m), "|"), "No such product") {
+		t.Fatalf("zR: %q", names(m))
+	}
+	keys(m, "z", "M")
+	if len(names(m)) != 1 {
+		t.Fatalf("zM: %q", names(m))
+	}
+}
+
+// l opens a request's examples, and then the request; o opens and closes
+// them, and opens a request without any.
+func TestLAndOOnARequestWithExamples(t *testing.T) {
+	m := New([]string{"c1", "f1"})
+	m.SetData(withExamples())
+	m.Select("r2")
+	if a := m.Key("l"); a != None || !strings.Contains(strings.Join(names(m), "|"), "A product") || m.Current().ID() != "r2" {
+		t.Fatalf("l on a folded request: %v, %q on %s", a, names(m), m.Current().Name())
+	}
+	if a := m.Key("l"); a != Open || m.Current().ID() != "r2" {
+		t.Fatalf("l again: %v on %s", a, m.Current().Name())
+	}
+	if a := m.Key("<Right>"); a != Open {
+		t.Fatalf("→ on an open request: %v", a)
+	}
+	if a := m.Key("o"); a != None || strings.Contains(strings.Join(names(m), "|"), "A product") {
+		t.Fatalf("o on an open request: %v, %q", a, names(m))
+	}
+	if a := m.Key("o"); a != None || !strings.Contains(strings.Join(names(m), "|"), "A product") {
+		t.Fatalf("o on a folded request: %v, %q", a, names(m))
+	}
+	if a := m.Key("<CR>"); a != Open {
+		t.Fatalf("⏎ on a request with examples: %v", a)
+	}
+	keys(m, "j")
+	if a := m.Key("o"); a != Open || m.Current().Kind != Example {
+		t.Fatalf("o on an example: %v", a)
+	}
+	m.Select("r1")
+	if a := m.Key("o"); a != Open {
+		t.Fatalf("o on a request without examples: %v", a)
+	}
+	if a := m.Key("l"); a != Open {
+		t.Fatalf("l on a request without examples: %v", a)
+	}
+	// While filtering, the examples that match show anyway: l opens.
+	m.Select("r2")
+	keys(m, "h")
+	m.StartFilter()
+	for _, r := range "get product" {
+		m.Key(string(r))
+	}
+	m.Key("<CR>")
+	m.Select("r2")
+	if n := m.Current(); n == nil || n.ID() != "r2" || m.Filter() == "" {
+		t.Fatalf("filtered to %v", names(m))
+	}
+	if a := m.Key("l"); a != Open {
+		t.Fatalf("l while filtering: %v", a)
+	}
+}
+
+// Selecting an example opens what it is in; marks show on its row.
+func TestSelectExample(t *testing.T) {
+	m := New(nil)
+	m.SetData(withExamples())
+	if !m.Select("e2") {
+		t.Fatal("not selected")
+	}
+	if n := m.Current(); n.Kind != Example || n.Name() != "No such product" {
+		t.Fatalf("on %s", n.Name())
+	}
+	m.SetMarks(Marks{Open: "e2", Drafts: map[string]bool{"e2": true}, Cut: map[string]bool{}})
+	view := ansi.Strip(strings.Join(m.View(50, 12, true), "\n"))
+	for _, l := range strings.Split(view, "\n") {
+		if strings.Contains(l, "No such product") && (!strings.Contains(l, "● e.g. No such product") || !strings.Contains(l, "+ 404")) {
+			t.Errorf("marks: %q", l)
+		}
+	}
+	// Folding away the examples keeps the cursor on the request.
+	m.Key("h")
+	keys(m, "h")
+	if n := m.Current(); n.ID() != "r2" {
+		t.Fatalf("on %s", n.Name())
+	}
+}
+
+// The filter finds examples by name, and shows them under their request.
+func TestFilterFindsExamples(t *testing.T) {
+	m := New(nil)
+	m.SetData(withExamples())
+	m.StartFilter()
+	for _, r := range "no such" {
+		m.Key(string(r))
+	}
+	if got := strings.Join(names(m), "|"); got != "Shop API| Products|  Get product|   No such product" {
+		t.Fatalf("filtered: %q", got)
+	}
+	if n := m.Current(); n.Kind != Example || n.ID() != "e2" {
+		t.Fatalf("cursor on %s", n.Name())
+	}
+	view := ansi.Strip(strings.Join(m.View(50, 12, true), "\n"))
+	if !strings.Contains(view, theme.Expanded+"GET  Get product 2") {
+		t.Fatalf("view:\n%s", view)
+	}
+	m.ClearFilter()
+	// A request and its example both matching show once each.
+	m.StartFilter()
+	for _, r := range "product" {
+		m.Key(string(r))
+	}
+	got := strings.Join(names(m), "|")
+	if strings.Count(got, "Get product") != 1 || !strings.Contains(got, "  Get product|   A product|   No such product") {
+		t.Fatalf("filtered: %q", got)
+	}
+}

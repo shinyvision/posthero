@@ -25,7 +25,8 @@ const usage = `posthero — Postman for the terminal, built for vim users
 
 Usage:
   posthero                 open your team's Postman workspace
-  posthero REQUEST         open a request: its name, id or Postman link
+  posthero REQUEST         open a request (or an example): its name, id or
+                           Postman link
   posthero FILE.json …     open collection and environment exports instead
   posthero --demo          try posthero on a made-up workspace
 

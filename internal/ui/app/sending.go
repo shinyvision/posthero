@@ -68,9 +68,12 @@ func (m *Model) docError(err error) tea.Cmd {
 // in the editor.
 func (m *Model) sendCurrent() tea.Cmd {
 	if m.focus == paneTree {
-		if n := m.tree.Current(); n != nil && n.Kind == tree.Request {
-			text := m.editor.text(n.Col.Summary.ID, n.Item.ID, n.Item)
-			return m.sendText(n.Col.Summary.ID, n.Item.ID, text)
+		if n := m.tree.Current(); n != nil && n.Leaf() {
+			ref := nodeRef(n)
+			if text, ok := m.docText(ref); ok {
+				return m.sendDoc(ref, text)
+			}
+			return nil
 		}
 		if n := m.tree.Current(); n != nil {
 			return m.runFolder(n)
@@ -80,11 +83,11 @@ func (m *Model) sendCurrent() tea.Cmd {
 		m.setStatus("open a request first (⏎ in the tree, or ctrl+p)", true)
 		return nil
 	}
-	_, it, _ := m.findItem(m.open.colID, m.open.itemID)
-	if it == nil {
+	text, ok := m.docText(m.open.docRef)
+	if !ok {
 		return nil
 	}
-	return m.sendText(m.open.colID, m.open.itemID, m.editor.text(m.open.colID, m.open.itemID, it))
+	return m.sendDoc(m.open.docRef, text)
 }
 
 // changesData reports whether a request changes something on the server:
@@ -135,7 +138,7 @@ func (m *Model) dispatch(c *store.Col, it *postman.Item, parents []*postman.Item
 	m.sendSeq++
 	seq := m.sendSeq
 	m.sending[it.ID] = inflight{seq: seq, cancel: cancel}
-	if m.open != nil && m.open.itemID == it.ID {
+	if m.open != nil && m.open.id() == it.ID {
 		m.resp.Busy = "sending " + it.Name + "…"
 		m.showRun = false
 	}
@@ -203,7 +206,7 @@ func (m *Model) sent(msg sentMsg) tea.Cmd {
 	rec.Secrets = msg.secrets // masked in what the history keeps
 	_ = m.hist.Add(rec)
 	m.last[itemID] = rec
-	if m.open != nil && m.open.itemID == itemID {
+	if m.open != nil && m.open.id() == itemID {
 		m.resp.Busy = ""
 		m.showRun = false
 		m.resp.Show(rec)
@@ -282,7 +285,7 @@ func (m *Model) lastRecord(itemID string) *history.Record {
 func (m *Model) updateMarks() {
 	marks := tree.Marks{Drafts: m.drafts.ids(), Status: map[string]int{}}
 	if m.open != nil {
-		marks.Open = m.open.itemID
+		marks.Open = m.open.id()
 	}
 	if m.cut != nil {
 		marks.Cut = map[string]bool{}

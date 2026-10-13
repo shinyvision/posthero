@@ -754,16 +754,15 @@ func (m *Model) followIDs(ids map[string]string) {
 	}
 	m.state.Env = env
 	if o := m.open; o != nil {
-		col, item := o.colID, o.itemID
-		if to, ok := ids[col]; ok {
-			col = to
+		ref := o.docRef
+		for _, id := range []*string{&ref.colID, &ref.itemID, &ref.exID} {
+			if to, ok := ids[*id]; ok {
+				*id = to
+			}
 		}
-		if to, ok := ids[item]; ok {
-			item = to
-		}
-		if col != o.colID || item != o.itemID {
-			m.open = &openRequest{colID: col, itemID: item, file: o.file}
-			m.editor.files[o.file] = col + "/" + item
+		if ref != o.docRef {
+			m.open = &openRequest{docRef: ref, file: o.file}
+			m.editor.files[o.file] = ref
 		}
 	}
 	m.saveState()

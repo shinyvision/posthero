@@ -185,7 +185,7 @@ func pad(s string, w int) string {
 // highlight returns an ANSI style for every byte of src, for posthero's
 // documents: the method, header and field names before the first blank
 // line, "### section" lines, comments, {{variables}}, and JSON strings and
-// numbers.
+// numbers. An example's ### response has a head too: its headers.
 func highlight(src string) []string {
 	styles := make([]string, len(src)+1)
 	for i := range styles {
@@ -205,7 +205,8 @@ func highlight(src string) []string {
 		switch {
 		case strings.HasPrefix(line, "###"):
 			set(off, end, keyword)
-			head = false
+			// The response's headers come right under it.
+			head = strings.EqualFold(strings.Fields(line + " x")[1], "response")
 		case trimmed == "":
 			if !first {
 				head = false

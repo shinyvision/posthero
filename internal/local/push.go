@@ -180,8 +180,13 @@ func (c *Copy) exec(ctx context.Context, api *postman.Client, o op, r *remote, i
 		if it.Folder {
 			return api.UpdateFolder(ctx, o.uid, it)
 		}
-		if _, err := api.UpdateRequest(ctx, o.uid, it); err != nil {
-			return err
+		// A request whose examples are all that changed stays as Postman
+		// has it: saving it would change it there (the API fills in
+		// settings it is sent nothing for).
+		if o.theirs == nil || !sameItem(withoutExamples(it), withoutExamples(o.theirs)) {
+			if _, err := api.UpdateRequest(ctx, o.uid, it); err != nil {
+				return err
+			}
 		}
 		return syncExamples(ctx, api, o.uid, it, o.theirs, ids)
 	case "move":
@@ -271,6 +276,14 @@ func syncExamples(ctx context.Context, api *postman.Client, uid string, mine, th
 		}
 	}
 	return nil
+}
+
+// withoutExamples is a request without its examples, to compare the rest.
+func withoutExamples(it *postman.Item) *postman.Item {
+	c := it.Clone()
+	c.Response = nil
+	c.Folder = it.Folder
+	return c
 }
 
 func ignoreGone(err error) error {

@@ -94,8 +94,9 @@ func TestEveryCommand(t *testing.T) {
 		"set": {"", "all", "wrap", "nowrap", "refresh=300"}, "jq": {"", ".[0].name"}, "code": {"", "python"},
 		"history": {"", "clear"}, "pull": {""}, "push": {""}, "workspace": {""}, "vars": {""}, "share": {""}, "reset": {"pageSize"},
 	}
-	// Changes asked for without a question: like yy then p, and u.
-	mayWrite := map[string]bool{"write": true, "run": true, "duplicate": true, "undo": true}
+	// Changes asked for without a question: like yy then p, and u; :example
+	// makes an example (a blank one, with no response shown).
+	mayWrite := map[string]bool{"write": true, "run": true, "duplicate": true, "undo": true, "example": true}
 	for _, c := range commands {
 		if skip[c.name] {
 			continue

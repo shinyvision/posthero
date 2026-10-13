@@ -376,7 +376,7 @@ func (m *Model) saveState() {
 		m.state.Cursor = n.ID()
 	}
 	if m.open != nil {
-		m.state.Open = m.open.colID + "/" + m.open.itemID
+		m.state.Open = m.open.String()
 	}
 	data, _ := jsonx.Marshal(m.state)
 	if string(data) == m.savedState {

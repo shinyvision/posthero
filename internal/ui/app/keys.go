@@ -55,22 +55,22 @@ var bindings = []binding{
 	{"<C-p>", inAll, "find", "find any request: type a few letters of its name, folder or URL", secMove},
 	{" ", inPanes, "menu", "every action, in a menu", secMove},
 	{"gh", inPanes, "history", "earlier responses of this request (:history for all)", secMove},
-	{"ge", inPanes, "examples", "the request's saved examples", secMove},
+	{"ge", inPanes, "examples", "the request's saved examples, to open one", secMove},
 	{"R", inPanes, "refresh", "get what your team changed in Postman now (it also happens by itself)", secMove},
 	{"W", inPanes, "workspace", "switch workspace", secMove},
 
 	// The tree.
-	{"e", inTree, "edit", "edit: a request in the editor; a folder's or collection's auth, scripts and variables", secTree},
+	{"e", inTree, "edit", "edit: a request (or example) in the editor; a folder's or collection's auth, scripts and variables", secTree},
 	{"a", inTree, "newrequest", "new request here", secTree},
 	{"A", inTree, "newfolder", "new folder here", secTree},
 	{"r", inTree, "rename", "rename", secTree},
 	{"D", inTree, "delete", "delete (asks first; u brings it back)", secTree},
 	{"dd", inTree, "cut", "cut, to move it with p", secTree},
 	{"yy", inTree, "yank", "copy, to put a copy with p; a collection: copy it to a workspace", secTree},
-	{"p", inTree, "put", "put what was cut or copied below the cursor (into a folder)", secTree},
+	{"p", inTree, "put", "put what was cut or copied below the cursor (into a folder; an example under a request)", secTree},
 	{"P", inTree, "putabove", "put it above", secTree},
 	{"u", inTree, "undo", "undo your last change (a save, a move, a delete …)", secTree},
-	{"K", inTree, "peek", "what the request sends: the URL as it goes out, its auth, its last response", secTree},
+	{"K", inTree, "peek", "what the request sends: the URL as it goes out, its auth, its last response (an example: what it says)", secTree},
 	{"<Esc>", inTree, "escape", "forget what was cut; clear the filter", secTree},
 
 	// The response.
@@ -97,6 +97,10 @@ var bindings = []binding{
 	{"<C-l>", inAll, "paneright", "the pane to the right", secWindows},
 	{"<C-j>", inAll, "panedown", "the pane below", secWindows},
 	{"<C-k>", inAll, "paneup", "the pane above", secWindows},
+	{"<C-S-h>", inAll, "borderleft", "move the tree's border left (ctrl+shift+l: right); so does dragging it", secWindows},
+	{"<C-S-l>", inAll, "borderright", "", secWindows},
+	{"<C-S-k>", inAll, "borderup", "move the line above the response up (ctrl+shift+j: down); so does dragging it", secWindows},
+	{"<C-S-j>", inAll, "borderdown", "", secWindows},
 	{"<C-w>", inPanes, "wincmd", "then h j k l w p o = < > + -: vim's window commands, on posthero's panes", secWindows},
 	{":", inPanes, "cmdline", "command line", secWindows},
 	{"?", inPanes, "help", "this help", secWindows},
@@ -193,6 +197,8 @@ func (m *Model) editorKey(k string, msg tea.KeyPressMsg) tea.Cmd {
 	switch k {
 	case "<C-h>", "<C-j>", "<C-k>", "<C-l>":
 		return m.do(map[string]string{"<C-h>": "paneleft", "<C-j>": "panedown", "<C-k>": "paneup", "<C-l>": "paneright"}[k], 0)
+	case "<C-S-h>", "<C-S-j>", "<C-S-k>", "<C-S-l>":
+		return m.do(map[string]string{"<C-S-h>": "borderleft", "<C-S-j>": "borderdown", "<C-S-k>": "borderup", "<C-S-l>": "borderright"}[k], 0)
 	case "<C-q>", "<F1>":
 		return m.do(map[string]string{"<C-q>": "quit", "<F1>": "help"}[k], 0)
 	case "<C-p>":
@@ -204,7 +210,7 @@ func (m *Model) editorKey(k string, msg tea.KeyPressMsg) tea.Cmd {
 		// editor's.
 		busy := m.running != nil
 		if m.open != nil {
-			_, sending := m.sending[m.open.itemID]
+			_, sending := m.sending[m.open.id()]
 			busy = busy || sending
 		}
 		if busy && m.cancelSend() {
@@ -342,8 +348,7 @@ func (m *Model) treeKey(k string) tea.Cmd {
 	before := m.tree.Current()
 	switch m.tree.Key(k) {
 	case tree.Open:
-		n := m.tree.Current()
-		return m.openItem(n.Col.Summary.ID, n.Item.ID, true)
+		return m.openDoc(nodeRef(m.tree.Current()), true)
 	case tree.Moved:
 		if n := m.tree.Current(); n != nil && n != before {
 			return m.preview(n)
@@ -352,16 +357,17 @@ func (m *Model) treeKey(k string) tea.Cmd {
 	return nil
 }
 
-// preview shows the request under the tree's cursor in the editor and its
-// last response, as the cursor moves.
+// preview shows the request (or example) under the tree's cursor in the
+// editor, and its last response (or what the example says comes back), as
+// the cursor moves.
 func (m *Model) preview(n *tree.Node) tea.Cmd {
-	if n.Kind != tree.Request {
+	if !n.Leaf() {
 		return nil
 	}
-	if m.open != nil && m.open.itemID == n.Item.ID {
+	if m.open != nil && m.open.docRef == nodeRef(n) {
 		return nil
 	}
-	return m.openItem(n.Col.Summary.ID, n.Item.ID, false)
+	return m.openDoc(nodeRef(n), false)
 }
 
 // keyTimeoutMsg ends a wait for more keys of a mapping.

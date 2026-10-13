@@ -134,6 +134,9 @@ func keyMsg(k string) tea.KeyPressMsg {
 	if c, ok := named[k]; ok {
 		return tea.KeyPressMsg{Code: c}
 	}
+	if strings.HasPrefix(k, "<C-S-") && len(k) == 7 {
+		return tea.KeyPressMsg{Code: rune(k[5]), Mod: tea.ModCtrl | tea.ModShift}
+	}
 	if strings.HasPrefix(k, "<C-") && len(k) == 5 {
 		return tea.KeyPressMsg{Code: rune(k[3]), Mod: tea.ModCtrl}
 	}
@@ -623,7 +626,8 @@ func TestGraphQLSchema(t *testing.T) {
 		t.Fatalf("no schema; schemas: %+v", d.m.schemas)
 	}
 	// Completion inside the selection set of createOrder (an Order).
-	lines := strings.Split(d.m.editor.text(d.m.open.colID, d.m.open.itemID, nil), "\n")
+	text, _ := d.m.docText(d.m.open.docRef)
+	lines := strings.Split(text, "\n")
 	row := -1
 	for i, l := range lines {
 		if strings.TrimSpace(l) == "total" {
@@ -782,5 +786,65 @@ func TestLoginUsesRequestTransport(t *testing.T) {
 	d.keys("<CR>")
 	if after := d.m.authm.Transport(); after == nil || after == before {
 		t.Fatal(":set proxy didn't reach logging in")
+	}
+}
+
+// Postman's scripts have packages and requests, which its API doesn't take
+// back. Changing a variable leaves the scripts be; changing a script
+// leaves empty ones out, and one that holds something isn't saved.
+func TestCollectionSettingsWithPostmansScripts(t *testing.T) {
+	d := newDriver(t)
+	colID := d.m.tree.Current().Col.Summary.ID
+	postmans := func(packages string) {
+		t.Helper()
+		d.demo.Postman.Edit(colID, func(c *postman.Collection) *postman.Item {
+			for i := range c.Event {
+				c.Event[i].Script.Extra = postman.Extra{"packages": json.RawMessage(packages), "requests": json.RawMessage(`{}`)}
+			}
+			return nil
+		})
+		d.keys("R")
+		if c := d.m.st.Col(colID); c == nil || len(c.Data.Event) == 0 || string(c.Data.Event[0].Script.Extra["packages"]) != packages {
+			t.Fatalf("posthero doesn't have Postman's scripts: %+v", c.Data.Event)
+		}
+	}
+	save := func() {
+		d.typeText(":w")
+		d.keys("<CR>")
+	}
+	postmans(`{"@shop/utils":{"id":"p1"}}`)
+
+	d.keys("e")
+	d.waitFor("Collection · Shop API")
+	d.typeText(":%s/pageSize: 10/pageSize: 25/")
+	d.keys("<CR>")
+	save()
+	d.waitFor("saved the collection to Postman")
+	c := d.colByName("Shop API")
+	if findVar(c.Variable, "pageSize") != "25" || string(c.Event[0].Script.Extra["packages"]) != `{"@shop/utils":{"id":"p1"}}` {
+		t.Fatalf("Postman has %+v and %+v", c.Variable, c.Event)
+	}
+
+	d.typeText(":%s/X-Request-Id/X-Trace-Id/")
+	d.keys("<CR>")
+	save()
+	d.waitFor("Not saved")
+	d.see("the collection's pre-request script has packages, which Postman's API can't save; change that script in Postman")
+	d.keys("<CR>")
+	d.typeText(":q!")
+	d.keys("<CR>")
+	if d.m.edit != nil {
+		t.Fatal(":q! didn't close the editor")
+	}
+
+	postmans(`{}`)
+	d.keys("e")
+	d.waitFor("Collection · Shop API")
+	d.typeText(":%s/X-Request-Id/X-Trace-Id/")
+	d.keys("<CR>")
+	save()
+	d.waitFor("saved the collection to Postman")
+	if got := postman.Scripts(d.colByName("Shop API").Event, "prerequest"); !strings.Contains(got, "X-Trace-Id") {
+		t.Fatalf("the script in Postman: %q", got)
 	}
 }

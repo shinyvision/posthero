@@ -25,9 +25,9 @@ type State struct {
 	Recent []string `json:"recent,omitempty"`
 	// TreeWidth is the tree's width in cells; EditorShare the editor's share
 	// of the height on the right, in percent. 0 is the default.
-	TreeWidth   int  `json:"treeWidth,omitempty"`
-	EditorShare int  `json:"editorShare,omitempty"`
-	TreeHidden  bool `json:"treeHidden,omitempty"`
+	TreeWidth   int     `json:"treeWidth,omitempty"`
+	EditorShare float64 `json:"editorShare,omitempty"`
+	TreeHidden  bool    `json:"treeHidden,omitempty"`
 	// Local are the workspaces in local mode (by id): posthero changes a
 	// copy on this machine, which :push sends to Postman.
 	Local map[string]bool `json:"local,omitempty"`

@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -17,13 +16,12 @@ import (
 	"github.com/shinyvision/posthero/internal/codegen"
 	"github.com/shinyvision/posthero/internal/history"
 	"github.com/shinyvision/posthero/internal/postman"
-	"github.com/shinyvision/posthero/internal/reqdoc"
 	"github.com/shinyvision/posthero/internal/send"
-	"github.com/shinyvision/posthero/internal/store"
 	"github.com/shinyvision/posthero/internal/ui/editmodal"
 	"github.com/shinyvision/posthero/internal/ui/modal"
 	"github.com/shinyvision/posthero/internal/ui/picker"
 	"github.com/shinyvision/posthero/internal/ui/respview"
+	"github.com/shinyvision/posthero/internal/ui/theme"
 	"github.com/shinyvision/posthero/internal/ui/tree"
 )
 
@@ -37,11 +35,11 @@ func (m *Model) do(action string, count int) tea.Cmd {
 		if n == nil {
 			return nil
 		}
-		if n.Kind == tree.Request && len(n.Parents) > 0 {
+		if n.Leaf() && len(n.Parents) > 0 {
 			p := n.Parents[len(n.Parents)-1]
 			return m.runFolder(&tree.Node{Kind: tree.Folder, Col: n.Col, Item: p, Parents: n.Parents[:len(n.Parents)-1]})
 		}
-		if n.Kind == tree.Request {
+		if n.Leaf() {
 			return m.runFolder(&tree.Node{Kind: tree.Collection, Col: n.Col})
 		}
 		return m.runFolder(n)
@@ -74,8 +72,8 @@ func (m *Model) do(action string, count int) tea.Cmd {
 		if n == nil {
 			return nil
 		}
-		if n.Kind == tree.Request {
-			return m.openItem(n.Col.Summary.ID, n.Item.ID, true)
+		if n.Leaf() {
+			return m.openDoc(nodeRef(n), true)
 		}
 		return m.editSettings(n)
 	case "newrequest":
@@ -154,6 +152,14 @@ func (m *Model) do(action string, count int) tea.Cmd {
 		m.moveFocus("j")
 	case "paneup":
 		m.moveFocus("k")
+	case "borderleft":
+		m.resize(-2, 0)
+	case "borderright":
+		m.resize(2, 0)
+	case "borderup":
+		m.resize(0, -1)
+	case "borderdown":
+		m.resize(0, 1)
 	case "wincmd":
 		m.keys.pending = "<C-w>"
 		return nil
@@ -177,7 +183,7 @@ func (m *Model) menu() tea.Cmd {
 			continue
 		}
 		switch b.action {
-		case "menu", "paneleft", "paneright", "panedown", "paneup", "wincmd", "cmdline", "escape", "back":
+		case "menu", "paneleft", "paneright", "panedown", "paneup", "borderleft", "borderright", "borderup", "borderdown", "wincmd", "cmdline", "escape", "back":
 			continue
 		}
 		seen[b.action] = true
@@ -226,11 +232,22 @@ func (m *Model) findRequest() tea.Cmd {
 			}
 			badge := tree.Badge(it)
 			st := tree.BadgeStyle(badge)
+			ref := docRef{colID: c.Summary.ID, itemID: it.ID}
 			all = append(all, entry{picker.Item{
 				Label: fmt.Sprintf("%-4s %s", badge, it.Name), Detail: path, Search: url, Style: &st,
-				Value:   [2]string{c.Summary.ID, it.ID},
-				Current: m.open != nil && m.open.itemID == it.ID,
-			}, recent[c.Summary.ID+"/"+it.ID]})
+				Value:   ref,
+				Current: m.open != nil && m.open.docRef == ref,
+			}, recent[ref.String()]})
+			// Its examples, under it.
+			for _, r := range it.Response {
+				dim := theme.Dim
+				ref := docRef{colID: c.Summary.ID, itemID: it.ID, exID: r.ID}
+				all = append(all, entry{picker.Item{
+					Label: tree.ExampleBadge + " " + r.Name, Detail: path + " / " + it.Name, Search: url, Style: &dim,
+					Value:   ref,
+					Current: m.open != nil && m.open.docRef == ref,
+				}, recent[ref.String()]})
+			}
 		}
 	}
 	sort.SliceStable(all, func(a, b int) bool { return all[a].score > all[b].score })
@@ -239,8 +256,8 @@ func (m *Model) findRequest() tea.Cmd {
 		items[i] = e.item
 	}
 	p := &picker.Picker{Title: "Find a request", Items: items, Placeholder: "name, folder, method or URL", Pick: func(it picker.Item) tea.Cmd {
-		ref := it.Value.([2]string)
-		return func() tea.Msg { return cmdMsg{func() tea.Cmd { return m.openItem(ref[0], ref[1], true) }} }
+		ref := it.Value.(docRef)
+		return func() tea.Msg { return cmdMsg{func() tea.Cmd { return m.openDoc(ref, true) }} }
 	}}
 	return p.Open()
 }
@@ -250,11 +267,14 @@ func (m *Model) peek(n *tree.Node) tea.Cmd {
 	if n == nil {
 		return nil
 	}
+	if n.Kind == tree.Example {
+		return m.peekExample(n)
+	}
 	if n.Kind != tree.Request {
 		return m.describeContainer(n)
 	}
 	colID := n.Col.Summary.ID
-	p, err := m.preparedFor(colID, n.Item)
+	p, err := m.preparedFor(nodeRef(n))
 	var b strings.Builder
 	if err != nil {
 		b.WriteString(err.Error() + "\n")
@@ -307,23 +327,23 @@ func (m *Model) describeContainer(n *tree.Node) tea.Cmd {
 	return showText(n.Name(), text)
 }
 
-// prepared is the current request as it would be sent now (without its
-// pre-request scripts and auth).
+// prepared is the current request (or example) as it would be sent now
+// (without its pre-request scripts and auth).
 func (m *Model) prepared() (*send.Prepared, error) {
 	n := m.treeNode()
-	if n == nil || n.Kind != tree.Request {
+	if n == nil || !n.Leaf() {
 		return nil, fmt.Errorf("pick a request first")
 	}
-	return m.preparedFor(n.Col.Summary.ID, n.Item)
+	return m.preparedFor(nodeRef(n))
 }
 
-func (m *Model) preparedFor(colID string, it *postman.Item) (*send.Prepared, error) {
-	text := m.editor.text(colID, it.ID, it)
-	item, err := reqdoc.Apply(it, text)
+func (m *Model) preparedFor(ref docRef) (*send.Prepared, error) {
+	item, parents, err := m.docItem(ref)
 	if err != nil {
 		return nil, err
 	}
-	c, _, parents := m.findItem(colID, it.ID)
+	colID := ref.colID
+	c := m.st.Col(colID)
 	a, from := send.EffectiveAuth(item, parents, c.Data)
 	r := send.FromItem(item, a, m.runner.Settings)
 	set := m.scopes(colID)
@@ -415,7 +435,10 @@ func (m *Model) browse(n *tree.Node) tea.Cmd {
 		return nil
 	}
 	u := "https://go.postman.co/collection/" + n.Col.Summary.UID
-	if n.Item != nil {
+	switch {
+	case n.Example != nil:
+		u = "https://go.postman.co/example/" + exampleUID(n.Col, n.Example)
+	case n.Item != nil:
 		kind := "request"
 		if n.Item.Folder {
 			kind = "folder"
@@ -508,9 +531,9 @@ func (m *Model) historyPicker(this bool) tea.Cmd {
 	list := m.hist.List()
 	title := "History"
 	if this && m.open != nil {
-		list = m.hist.Of(m.open.itemID)
-		if _, it, _ := m.findItem(m.open.colID, m.open.itemID); it != nil {
-			title = "History of " + it.Name
+		list = m.hist.Of(m.open.id())
+		if name := m.docName(m.open.docRef); name != "" {
+			title = "History of " + name
 		}
 	}
 	if len(list) == 0 {
@@ -553,131 +576,6 @@ func (m *Model) historyPicker(this bool) tea.Cmd {
 		}
 	}}
 	return p.Open()
-}
-
-// examples lists the open request's saved examples.
-func (m *Model) examples() tea.Cmd {
-	n := m.treeNode()
-	if n == nil || n.Kind != tree.Request {
-		m.setStatus("pick a request first", true)
-		return nil
-	}
-	if len(n.Item.Response) == 0 {
-		m.setStatus("no examples saved for "+n.Item.Name+" · :example NAME saves the response as one", false)
-		return nil
-	}
-	var items []picker.Item
-	for _, r := range n.Item.Response {
-		items = append(items, picker.Item{Label: r.Name, Detail: fmt.Sprintf("%d %s", r.Code, r.Status), Value: r})
-	}
-	p := &picker.Picker{Title: "Examples of " + n.Item.Name, Items: items, Pick: func(it picker.Item) tea.Cmd {
-		resp := it.Value.(*postman.Response)
-		return func() tea.Msg {
-			return cmdMsg{func() tea.Cmd {
-				m.showRun = false
-				m.resp.Show(exampleRecord(n.Item, resp))
-				m.focusPane(paneResp)
-				m.setStatus("example: "+resp.Name, false)
-				return nil
-			}}
-		}
-	}}
-	return p.Open()
-}
-
-// exampleRecord shows a saved example like a response.
-func exampleRecord(it *postman.Item, r *postman.Response) *history.Record {
-	rec := &history.Record{ID: "example-" + r.ID, Name: it.Name + " · " + r.Name, Status: r.Code, StatusText: r.Status, Body: []byte(r.Body), Example: true, At: time.Now()}
-	for _, h := range r.Header {
-		rec.Headers = append(rec.Headers, send.Header{Name: h.Key, Value: string(h.Value)})
-	}
-	if rec.Status == 0 {
-		rec.Status = 200
-	}
-	if o := r.OriginalRequest; o != nil {
-		rec.Method = o.Method
-		if o.URL != nil {
-			rec.URL = o.URL.Raw
-		}
-	}
-	return rec
-}
-
-// saveExample saves the response in the pane as an example of its
-// request.
-func (m *Model) saveExample(name string) tea.Cmd {
-	r := m.resp.Record()
-	if r == nil || r.Example || r.ItemID == "" || r.Status == 0 {
-		m.setStatus("send the request first; the response shown is what gets saved", true)
-		return nil
-	}
-	c, it, _ := m.findItem(r.CollectionID, r.ItemID)
-	if it == nil {
-		m.setStatus("the request isn't there any more", true)
-		return nil
-	}
-	if name == "" {
-		name = fmt.Sprintf("%d %s", r.Status, r.StatusText)
-	}
-	ex := &postman.Response{Name: name, Code: r.Status, Status: r.StatusText, Body: string(r.Body), OriginalRequest: it.Request}
-	for _, h := range r.Headers {
-		ex.Header = append(ex.Header, postman.Param{Key: h.Name, Value: postman.Str(h.Value)})
-	}
-	if strings.Contains(r.ContentType(), "json") {
-		ex.PreviewLanguage = "json"
-	}
-	colID := c.Summary.ID
-	itemID := it.ID
-	// Taken back by deleting the example again.
-	undo := func(exID string) *undoEntry {
-		return &undoEntry{what: "save the example " + name, kind: undoRestore, restore: func() tea.Cmd { return m.deleteExample(colID, itemID, exID) }}
-	}
-	if c.Path != "" || m.st.API == nil {
-		ex.ID = store.NewID()
-		return m.saveFile(c, func() { it.Response = append(it.Response, ex) }, func() tea.Msg {
-			return changedMsg{colID: colID, undo: undo(ex.ID), note: "saved the example " + name}
-		})
-	}
-	api := m.api
-	uid := c.Summary.UID
-	to := m.saveTarget()
-	return m.run("saving the example", func(ctx context.Context) tea.Msg {
-		id, err := api.CreateResponse(ctx, uid, itemID, ex)
-		if err != nil {
-			return changedMsg{err: err}
-		}
-		col, err := api.Collection(ctx, uid)
-		return changedMsg{colID: colID, col: col, err: err, undo: undo(id), note: "saved the example " + name + " " + to}
-	})
-}
-
-// deleteExample deletes a saved example of a request.
-func (m *Model) deleteExample(colID, itemID, exID string) tea.Cmd {
-	c, it, _ := m.findItem(colID, itemID)
-	if it == nil {
-		m.setStatus("the request isn't there any more", true)
-		return nil
-	}
-	if c.Path != "" || m.st.API == nil {
-		return m.saveFile(c, func() {
-			var keep []*postman.Response
-			for _, r := range it.Response {
-				if r.ID != exID {
-					keep = append(keep, r)
-				}
-			}
-			it.Response = keep
-		}, func() tea.Msg { return changedMsg{colID: colID, note: "deleted the example"} })
-	}
-	api := m.api
-	uid := c.Summary.UID
-	return m.run("deleting the example", func(ctx context.Context) tea.Msg {
-		if err := api.DeleteResponse(ctx, uid, exID); err != nil {
-			return changedMsg{err: err}
-		}
-		col, err := api.Collection(ctx, uid)
-		return changedMsg{colID: colID, col: col, err: err, note: "deleted the example"}
-	})
 }
 
 // requestQuit quits, asking first when requests have changes not saved to

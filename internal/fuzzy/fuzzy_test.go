@@ -90,3 +90,14 @@ func TestLowercaseKeepsPositions(t *testing.T) {
 		Filter("i", []string{c})
 	}
 }
+
+// Words typed together, found together, beat the same words found apart.
+func TestPhrase(t *testing.T) {
+	got := Filter("a product", []string{
+		"GET  Get product Shop API / Products {{baseUrl}}/api/products/:id",
+		"e.g. A product Shop API / Products / Get product {{baseUrl}}/api/products/:id",
+	})
+	if len(got) != 2 || got[0].Index != 1 {
+		t.Fatalf("%+v", got)
+	}
+}

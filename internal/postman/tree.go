@@ -38,6 +38,38 @@ func (c *Collection) Find(id string) (*Item, []*Item) {
 	return found, path
 }
 
+// FindExample returns the saved example with an id, the request it belongs
+// to and the folders that request is in.
+func (c *Collection) FindExample(id string) (*Item, *Response, []*Item) {
+	if id == "" {
+		return nil, nil, nil
+	}
+	var req *Item
+	var found *Response
+	var path []*Item
+	c.Walk(func(it *Item, parents []*Item) bool {
+		if found != nil {
+			return false
+		}
+		if r := it.Example(id); r != nil {
+			req, found, path = it, r, parents
+			return false
+		}
+		return true
+	})
+	return req, found, path
+}
+
+// Example returns the request's saved example with an id, or nil.
+func (it *Item) Example(id string) *Response {
+	for _, r := range it.Response {
+		if r.ID == id || (r.UID != "" && r.UID == id) {
+			return r
+		}
+	}
+	return nil
+}
+
 // Requests returns every request item with the folders it is in.
 func (c *Collection) Requests() []Located {
 	var out []Located
@@ -126,6 +158,14 @@ func (c *Collection) Clone() *Collection {
 func (it *Item) Clone() *Item {
 	data, _ := jsonx.Marshal(it)
 	var out Item
+	_ = json.Unmarshal(data, &out)
+	return &out
+}
+
+// Clone returns a deep copy of the example.
+func (r *Response) Clone() *Response {
+	data, _ := jsonx.Marshal(r)
+	var out Response
 	_ = json.Unmarshal(data, &out)
 	return &out
 }

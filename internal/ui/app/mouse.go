@@ -13,6 +13,15 @@ import (
 // doubleClick is the longest gap between the presses of a double click.
 const doubleClick = 400 * time.Millisecond
 
+// split is a border between panes that the mouse can drag.
+type split int
+
+const (
+	noSplit   split = iota
+	treeSplit       // between the tree and the request
+	respSplit       // between the request and the response
+)
+
 // mouseState tracks clicks across mouse messages, and where the last View
 // drew the dialogs.
 type mouseState struct {
@@ -20,7 +29,9 @@ type mouseState struct {
 	last   time.Time
 	lastAt tea.Mouse
 	clicks int
-	target pane // the pane that got the press, for drags
+	target pane  // the pane that got the press, for drags
+	split  split // the border being dragged
+	grab   int   // the pointer's distance from that border
 
 	modal, edit rect
 }
@@ -95,6 +106,9 @@ func (m *Model) mouse(msg tea.MouseMsg) tea.Cmd {
 		m.cmdline = nil
 	}
 	l := m.layout()
+	if m.dragSplit(ev, l) {
+		return nil
+	}
 	at := paneTree
 	switch {
 	case ev.Action == mouse.Drag || ev.Action == mouse.Release:
@@ -150,8 +164,45 @@ func (m *Model) mouse(msg tea.MouseMsg) tea.Cmd {
 	return nil
 }
 
+// dragSplit moves a border between panes: a press on one picks it up, and
+// it follows the pointer until the button is let go.
+func (m *Model) dragSplit(ev mouse.Event, l layout) bool {
+	switch ev.Action {
+	case mouse.Drag, mouse.Release:
+		switch m.ms.split {
+		case treeSplit:
+			m.setTreeWidth(ev.X - m.ms.grab)
+		case respSplit:
+			m.setEditorHeight(ev.Y - m.ms.grab)
+		default:
+			return false
+		}
+		if ev.Action == mouse.Release {
+			m.ms.split = noSplit
+		}
+		return true
+	case mouse.Press:
+		m.ms.split = noSplit
+		if !ev.Left() || m.zoomed {
+			return false
+		}
+		edge := l.tree.x + l.tree.w
+		switch {
+		case l.tree.visible() && ev.Y < l.statusY && (ev.X == edge-1 || ev.X == edge):
+			m.ms.split, m.ms.grab = treeSplit, ev.X-l.tree.w
+		case ev.X > l.resp.x && ev.X < l.resp.x+l.resp.w-1 && (ev.Y == l.resp.y-1 || ev.Y == l.resp.y):
+			m.ms.split, m.ms.grab = respSplit, ev.Y-l.editor.h
+		default:
+			return false
+		}
+		return true
+	}
+	return false
+}
+
 // treeMouse: a click picks a row (and shows the request), a double click
-// opens it or folds the folder, a right click shows what can be done.
+// opens it, a click folds a folder (and a request's examples, on its
+// arrow), a right click shows what can be done.
 func (m *Model) treeMouse(ev mouse.Event, dy int) tea.Cmd {
 	switch {
 	case ev.Action == mouse.Wheel && dy != 0:
@@ -170,12 +221,14 @@ func (m *Model) treeMouse(ev mouse.Event, dy int) tea.Cmd {
 		case ev.Button == tea.MouseRight:
 			return m.menuAt(ev.X, ev.Y)
 		case !ev.Left():
-		case n.Kind != tree.Request:
+		case !n.Leaf():
 			if ev.Clicks == 1 {
 				m.tree.Toggle()
 			}
+		case ev.Clicks == 1 && n.Foldable() && m.onFoldMark(n, ev.X):
+			m.tree.Toggle()
 		case ev.Clicks >= 2:
-			return m.openItem(n.Col.Summary.ID, n.Item.ID, true)
+			return m.openDoc(nodeRef(n), true)
 		default:
 			return m.preview(n)
 		}
@@ -198,4 +251,11 @@ func (m *Model) menuAt(x, y int) tea.Cmd {
 		}
 		return msg
 	}
+}
+
+// onFoldMark reports whether x is on a tree row's fold arrow: after the
+// pane's border and the row's indent.
+func (m *Model) onFoldMark(n *tree.Node, x int) bool {
+	at := m.layout().tree.x + 2 + 2*n.Depth
+	return x >= at-1 && x < at+2
 }

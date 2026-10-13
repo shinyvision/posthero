@@ -244,23 +244,32 @@ func (m *Model) fetched(msg fetchedMsg) tea.Cmd {
 		m.tree.SetData(m.st.Collections())
 		m.updateMarks()
 	}
-	// The open request changed in Postman.
+	// The open request (or example) changed in Postman.
 	if m.open != nil {
 		for _, id := range ch.Cols {
 			if id != m.open.colID {
 				continue
 			}
-			c, it, _ := m.findItem(m.open.colID, m.open.itemID)
+			ref := m.open.docRef
+			what := "request"
+			if ref.exID != "" {
+				what = "example"
+			}
+			c, _, _ := m.findItem(ref.colID, ref.itemID)
+			doc, _, ok := m.renderDoc(ref)
 			switch {
-			case it == nil && c != nil && c.Data != nil:
+			case !ok && c != nil && c.Data != nil && ref.exID != "":
+				m.setStatus("the open example was deleted in Postman; your text is still in the editor", true)
+			case !ok && c != nil && c.Data != nil:
 				m.setStatus("the open request was deleted in Postman; your text is still in the editor: yank it into a new request (a in the tree)", true)
-			case it != nil:
-				if _, draft := m.drafts.get(it.ID); draft {
-					if m.editor.texts[m.open.file] != "" && strings.TrimSuffix(reqdoc.Render(it), "\n") != m.drafts.textOr(it.ID) {
-						m.setStatus("someone changed this request in Postman; your changes are kept · :e! takes theirs", false)
+			case ok:
+				if _, draft := m.drafts.get(ref.id()); draft {
+					if m.editor.texts[m.open.file] != "" && strings.TrimSuffix(doc, "\n") != m.drafts.textOr(ref.id()) {
+						m.setStatus("someone changed this "+what+" in Postman; your changes are kept · :e! takes theirs", false)
 					}
 				} else {
-					m.editor.changedOnServer(m.open.colID, it)
+					m.docChanged(ref)
+					m.refreshShownExample()
 				}
 			}
 		}
@@ -299,12 +308,15 @@ func (m *Model) afterLoad() tea.Cmd {
 		if c, it := m.lookup(target); it != nil {
 			return m.openItem(c.Summary.ID, it.ID, true)
 		}
+		if ref, ok := m.lookupExample(target, false); ok {
+			return m.openExample(ref, true)
+		}
 		m.setStatus("no request "+target+" in this workspace", true)
 	}
 	if m.open == nil && m.state.Open != "" {
-		colID, itemID, _ := strings.Cut(m.state.Open, "/")
-		if _, it, _ := m.findItem(colID, itemID); it != nil {
-			cmds = append(cmds, m.openItem(colID, itemID, false))
+		ref := parseRef(m.state.Open)
+		if _, _, ok := m.renderDoc(ref); ok {
+			cmds = append(cmds, m.openDoc(ref, false))
 		}
 	}
 	if m.state.Cursor != "" {
@@ -353,7 +365,7 @@ func (m *Model) openItem(colID, itemID string, focus bool) tea.Cmd {
 		m.tree.Select(itemID)
 		return nil
 	}
-	m.editor.open(c.Summary.ID, it)
+	m.editor.open(docRef{colID: c.Summary.ID, itemID: it.ID}, reqdoc.Render(it), it.UpdatedAt)
 	m.state.AddRecent(c.Summary.ID + "/" + it.ID)
 	m.tree.Select(itemID)
 	m.showRun = false
@@ -401,7 +413,7 @@ func (m *Model) save(colID, itemID, text string, force bool) tea.Cmd {
 	item, err := reqdoc.Apply(it, text)
 	if err != nil {
 		m.quitAfterSave = false // :wq stays: the text needs fixing first
-		m.drafts.set(itemID, text, m.editor.baseOf(it))
+		m.drafts.set(itemID, text, m.editor.baseOf(it.ID, it.UpdatedAt))
 		m.updateMarks()
 		return m.docError(err)
 	}
@@ -420,7 +432,7 @@ func (m *Model) save(colID, itemID, text string, force bool) tea.Cmd {
 	}
 	api := m.api
 	// Changed in Postman since the version this text started from?
-	known := m.editor.baseOf(it)
+	known := m.editor.baseOf(it.ID, it.UpdatedAt)
 	if b := m.drafts.base(itemID); b != "" {
 		known = b
 	}
@@ -450,6 +462,11 @@ func (m *Model) saveFile(c *store.Col, change func(), then func() tea.Msg) tea.C
 		case savedMsg:
 			x.err = err
 			return x
+		case changedMsg:
+			if x.saved != nil { // an example's save: its text stays a draft
+				x.err, x.col, x.undo = err, nil, nil
+				return x
+			}
 		}
 		return errorMsg{"Not saved", err}
 	}
@@ -629,12 +646,32 @@ type changedMsg struct {
 	open bool
 	// dropDrafts are requests whose drafts go (they were deleted).
 	dropDrafts []string
+	// saved is a document saved from its text (an example's).
+	saved *savedDoc
 }
 
 func (m *Model) changed(msg changedMsg) tea.Cmd {
 	if msg.err == nil || msg.undo != nil {
 		for _, id := range msg.dropDrafts {
 			m.drafts.drop(id)
+		}
+	}
+	if s := msg.saved; s != nil {
+		m.savesInFlight = max(0, m.savesInFlight-1)
+		id := s.ref.id()
+		switch {
+		case msg.err != nil && msg.undo == nil:
+			// Not saved: the text stays, as a draft.
+			m.quitAfterSave = false
+			m.drafts.set(id, s.text, m.drafts.base(id))
+			m.updateMarks()
+			m.setStatus("not saved: "+msg.err.Error(), true)
+			return nil
+		default:
+			// What was typed after the save stays a draft.
+			if d, ok := m.drafts.get(id); !ok || strings.TrimRight(d, "\n") == strings.TrimRight(s.text, "\n") {
+				m.drafts.drop(id)
+			}
 		}
 	}
 	if msg.err != nil {
@@ -658,6 +695,14 @@ func (m *Model) changed(msg changedMsg) tea.Cmd {
 	if msg.undo != nil {
 		m.pushUndo(*msg.undo)
 	}
+	if s := msg.saved; s != nil {
+		// What is in Postman now is what the buffer, and a draft typed
+		// since, start from.
+		if _, base, ok := m.renderDoc(s.ref); ok {
+			m.editor.bases[s.ref.id()] = base
+			m.drafts.rebase(s.ref.id(), base)
+		}
+	}
 	m.tree.SetData(m.st.Collections())
 	if msg.selectID != "" {
 		m.tree.Select(msg.selectID)
@@ -668,21 +713,37 @@ func (m *Model) changed(msg changedMsg) tea.Cmd {
 	}
 	var cmd tea.Cmd
 	if m.open != nil && m.open.colID == msg.colID {
-		if _, it, _ := m.findItem(msg.colID, m.open.itemID); it != nil {
-			m.editor.changedOnServer(msg.colID, it)
-		}
+		m.docChanged(m.open.docRef)
+		m.refreshShownExample()
 	}
 	if msg.open && msg.selectID != "" {
-		cmd = m.openItem(msg.colID, msg.selectID, true)
+		if ref, ok := m.refOf(msg.colID, msg.selectID); ok {
+			cmd = m.openDoc(ref, true)
+		}
 	}
 	return cmd
 }
 
-// treeNode is the node under the tree's cursor, or the open request.
+// refreshShownExample shows the open example as it is saved now, when the
+// response pane shows it.
+func (m *Model) refreshShownExample() {
+	if m.open == nil || m.open.exID == "" || !m.showingExample() || m.resp.Record().ItemID != m.open.exID {
+		return
+	}
+	if _, it, _, ex := m.findDoc(m.open.docRef); ex != nil {
+		m.resp.Show(exampleRecord(m.open.colID, it, ex))
+	}
+}
+
+// treeNode is the node under the tree's cursor, or the open request (or
+// example).
 func (m *Model) treeNode() *tree.Node {
 	if m.focus != paneTree && m.open != nil {
-		c, it, parents := m.findItem(m.open.colID, m.open.itemID)
-		if it != nil {
+		c, it, parents, ex := m.findDoc(m.open.docRef)
+		switch {
+		case ex != nil:
+			return &tree.Node{Kind: tree.Example, Col: c, Item: it, Parents: parents, Example: ex}
+		case it != nil && m.open.exID == "":
 			return &tree.Node{Kind: tree.Request, Col: c, Item: it, Parents: parents}
 		}
 	}

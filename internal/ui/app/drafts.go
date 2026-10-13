@@ -4,18 +4,17 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/shinyvision/posthero/internal/jsonx"
 	"github.com/shinyvision/posthero/internal/postman"
-	"github.com/shinyvision/posthero/internal/reqdoc"
 	"github.com/shinyvision/posthero/internal/secret"
 )
 
-// drafts are requests' texts that differ from what Postman has: changes
-// not saved yet. They survive quitting, like unsaved tabs in Postman.
+// drafts are requests' (and examples') texts that differ from what Postman
+// has: changes not saved yet. They survive quitting, like unsaved tabs in
+// Postman.
 type drafts struct {
 	mu    sync.Mutex
 	path  string
@@ -121,22 +120,6 @@ func (d *drafts) save() {
 	}
 }
 
-// trackDraft keeps text as a request's draft when it differs from what
-// Postman has, and drops the draft when it is the same again.
-func (m *Model) trackDraft(colID, itemID, text string) {
-	_, it, _ := m.findItem(colID, itemID)
-	if it == nil {
-		return
-	}
-	saved := strings.TrimSuffix(reqdoc.Render(it), "\n")
-	if strings.TrimRight(text, "\n") == saved {
-		m.drafts.drop(itemID)
-	} else {
-		m.drafts.set(itemID, text, m.editor.baseOf(it))
-	}
-	m.updateMarks()
-}
-
 // vault keeps pm.vault and {{vault:name}} secrets on this machine: the
 // names in a file, the values in the system keyring (or the file, readable
 // only by the user, without one).
@@ -220,8 +203,9 @@ func (v *vault) save() error {
 	return os.WriteFile(v.path, data, 0o600)
 }
 
-// pruneDrafts drops the drafts of requests that aren't in any collection
-// any more (a teammate deleted them), once every collection is loaded.
+// pruneDrafts drops the drafts of requests (and examples) that aren't in
+// any collection any more (a teammate deleted them), once every collection
+// is loaded.
 func (m *Model) pruneDrafts() {
 	if m.st == nil {
 		return
@@ -233,11 +217,14 @@ func (m *Model) pruneDrafts() {
 		}
 		c.Data.Walk(func(it *postman.Item, _ []*postman.Item) bool {
 			have[it.ID] = true
+			for _, r := range it.Response {
+				have[r.ID] = true
+			}
 			return true
 		})
 	}
 	for id := range m.drafts.ids() {
-		if !have[id] && (m.open == nil || m.open.itemID != id) {
+		if !have[id] && (m.open == nil || m.open.id() != id) {
 			m.drafts.drop(id)
 		}
 	}

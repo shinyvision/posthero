@@ -62,6 +62,28 @@ values from the server's schema, and K says what a field is. posthero asks
 the server for its schema by itself once you're logged in (on production
 only after you sent a request there); :schema asks again.`
 
+// exampleHelp explains saved examples.
+const exampleHelp = `A request's saved examples fold under it in the tree: l opens them (l
+again opens the request), o, Tab and za open and close them, h closes
+them, and ge lists them. One opens like a request does: the request it
+was saved with, then what came back.
+
+  GET {{base}}/products/p-1001       the request it was saved with
+  Accept: application/json
+
+  ### response 200 OK                the status: a code, and its text
+  Content-Type: application/json     the response's headers
+
+  {"id": "p-1001"}                   the body, after a blank line
+
+JSON on one line shows spread out; it stays as it was unless you change it.
+:w saves the example, ⏎ sends its request (with the request's auth and
+scripts), and :example! then keeps what came back in it. :example NAME
+saves the response shown as a new example (with none shown, it makes a
+blank one to fill in). In the tree, r renames an example, D deletes it,
+yy or dd then p on a request copies or moves it there, :dup copies it, and
+u takes any of it back.`
+
 // localHelp explains local mode.
 const localHelp = `:set local works on a copy of the workspace on this machine: saves,
 moves, renames and environments change the copy, not Postman, until you
@@ -91,6 +113,8 @@ func (m *Model) showHelp() tea.Cmd {
 		lines = append(lines, strings.Split(helpIntro, "\n")...)
 		heading("The request")
 		lines = append(lines, strings.Split(docHelp, "\n")...)
+		heading("Examples")
+		lines = append(lines, strings.Split(exampleHelp, "\n")...)
 		var order []string
 		bySection := map[string][]binding{}
 		for _, b := range bindings {
@@ -115,9 +139,11 @@ func (m *Model) showHelp() tea.Cmd {
 			}
 		}
 		heading("In the tree")
-		lines = append(lines, "  j k gg G ctrl+d ctrl+u   move;  h l  close, open;  za zo zc zM zR  fold",
-			"  /              narrow the tree as you type (fuzzy: names, folders, methods, URLs)",
-			"  ⏎              open the request (in the editor); on a folder: fold it")
+		lines = append(lines, "  j k gg G ctrl+d ctrl+u   move;  za zo zc zM zR  fold",
+			"  h l            close, open; l on a request opens its examples, l again the request",
+			"  o Tab          open or close a folder, or a request's examples",
+			"  /              narrow the tree as you type (fuzzy: names, folders, methods, URLs, examples)",
+			"  ⏎              open the request or example (in the editor); on a folder: fold it")
 		heading("In the response")
 		lines = append(lines, "  j k gg G ctrl+d ctrl+u H M L   move",
 			"  za zo zc zM zR tab   fold the JSON (and the tests, console, headers above it)",
@@ -170,7 +196,7 @@ func (m *Model) showHelp() tea.Cmd {
 
 // displayKeys writes keys for people: <C-p> as ctrl+p, a space as space.
 func displayKeys(k string) string {
-	r := strings.NewReplacer("<C-", "ctrl+", "<CR>", "⏎", "<Esc>", "esc", "<BS>", "backspace", "<F1>", "F1", ">", "", " ", "space")
+	r := strings.NewReplacer("<C-S-", "ctrl+shift+", "<C-", "ctrl+", "<CR>", "⏎", "<Esc>", "esc", "<BS>", "backspace", "<F1>", "F1", ">", "", " ", "space")
 	if k == " " {
 		return "space"
 	}

@@ -166,14 +166,14 @@ func init() {
 		{name: "quit", short: "q", help: "quit (asks when requests have changes not saved; ! doesn't)", run: func(m *Model, _ string, bang bool) tea.Cmd { return m.requestQuit(bang) }},
 		{name: "qall", short: "qa", help: "quit", run: func(m *Model, _ string, bang bool) tea.Cmd { return m.requestQuit(bang) }},
 		{name: "xit", short: "x", help: "quit", run: func(m *Model, _ string, bang bool) tea.Cmd { return m.requestQuit(bang) }},
-		{name: "write", short: "w", args: "[FILE]", help: "save the request to Postman; with a file, save the response body to it", complete: "file", run: cmdWrite},
+		{name: "write", short: "w", args: "[FILE]", help: "save the request (or example) to Postman; with a file, save the response body to it", complete: "file", run: cmdWrite},
 		{name: "wq", help: "save the request and quit", run: func(m *Model, _ string, bang bool) tea.Cmd {
 			// Quit once the save is done (or right away when there's nothing
 			// to save); a save that fails keeps posthero open.
 			m.quitAfterSave, m.quitAfterSaveBang = true, bang
 			return cmdWrite(m, "", false)
 		}},
-		{name: "edit", short: "e", args: "[NAME]", help: "open a request by name; :e! throws away the changes to the open one", complete: "request", run: cmdEdit},
+		{name: "edit", short: "e", args: "[NAME]", help: "open a request (or example) by name; :e! throws away the changes to the open one", complete: "request", run: cmdEdit},
 		{name: "find", short: "f", args: "[TEXT]", help: "find a request (ctrl+p)", run: func(m *Model, _ string, _ bool) tea.Cmd { return m.findRequest() }},
 		{name: "send", short: "s", help: "send the request", run: func(m *Model, _ string, _ bool) tea.Cmd { return m.sendCurrent() }},
 		{name: "run", args: "[-n N] [-d FILE] [-delay MS] [-bail] [-noscripts]", help: "run the folder or collection: N times, once per row of a CSV or JSON file", complete: "file", run: cmdRun},
@@ -216,8 +216,13 @@ func init() {
 			m.setStatus(":history takes nothing or clear", true)
 			return nil
 		}},
-		{name: "examples", short: "exa", help: "the request's saved examples", run: func(m *Model, _ string, _ bool) tea.Cmd { return m.examples() }},
-		{name: "example", args: "[NAME]", help: "save the response as an example of the request", run: func(m *Model, arg string, _ bool) tea.Cmd { return m.saveExample(arg) }},
+		{name: "examples", short: "exa", help: "the request's saved examples, to open one", run: func(m *Model, _ string, _ bool) tea.Cmd { return m.examples() }},
+		{name: "example", args: "[NAME]", help: "save the response shown as an example of its request (with none, a blank one to fill in); :example! keeps it in the open example", run: func(m *Model, arg string, bang bool) tea.Cmd {
+			if bang {
+				return m.updateExample()
+			}
+			return m.saveExample(arg)
+		}},
 		{name: "schema", help: "fetch the GraphQL schema of the open request's server again (completion and K use it)", run: cmdSchema},
 		{name: "jq", args: "[FILTER]", help: "filter the response body with jq; without a filter, show the body", run: cmdJQ},
 		{name: "code", args: "[LANGUAGE]", help: "the request as code: " + strings.Join(codegen.Languages, ", "), complete: "language", run: cmdCode},
@@ -300,7 +305,7 @@ func (m *Model) containerNode() *tree.Node {
 	if n == nil {
 		return nil
 	}
-	if n.Kind == tree.Request {
+	if n.Leaf() {
 		if len(n.Parents) > 0 {
 			return &tree.Node{Kind: tree.Folder, Col: n.Col, Item: n.Parents[len(n.Parents)-1], Parents: n.Parents[:len(n.Parents)-1]}
 		}
@@ -337,11 +342,11 @@ func cmdWrite(m *Model, arg string, _ bool) tea.Cmd {
 		m.editor.backend.Command("w")
 		return nil
 	}
-	_, it, _ := m.findItem(m.open.colID, m.open.itemID)
-	if it == nil {
+	text, ok := m.docText(m.open.docRef)
+	if !ok {
 		return nil
 	}
-	return m.saveRequest(m.open.colID, m.open.itemID, m.editor.text(m.open.colID, m.open.itemID, it))
+	return m.saveDoc(m.open.docRef, text)
 }
 
 func (m *Model) respJQ() (string, bool) {
@@ -368,11 +373,10 @@ func cmdEdit(m *Model, arg string, bang bool) tea.Cmd {
 	if arg == "" {
 		if bang && m.open != nil {
 			// Throw away the changes: Postman's version again.
-			m.drafts.drop(m.open.itemID)
-			_, it, _ := m.findItem(m.open.colID, m.open.itemID)
-			if it != nil && m.editor.backend != nil {
+			m.drafts.drop(m.open.id())
+			if m.editor.backend != nil {
 				m.editor.backend.Command("e!")
-				m.editor.changedOnServer(m.open.colID, it)
+				m.docChanged(m.open.docRef)
 			}
 			m.updateMarks()
 			m.setStatus("threw away the changes", false)
@@ -382,6 +386,9 @@ func cmdEdit(m *Model, arg string, bang bool) tea.Cmd {
 	}
 	c, it := m.findRequest2(arg)
 	if it == "" {
+		if ref, ok := m.lookupExample(arg, true); ok {
+			return m.openExample(ref, true)
+		}
 		m.setStatus("no request "+arg, true)
 		return nil
 	}
@@ -524,6 +531,9 @@ func cmdDuplicate(m *Model, _ string, _ bool) tea.Cmd {
 	}
 	if n.Item == nil {
 		return m.copyCollection(n.Col, m.st.Workspace, nil)
+	}
+	if n.Kind == tree.Example {
+		return m.copyExample(nodeRef(n), n.Col.Summary.ID, n.Item.ID)
 	}
 	m.cutNode(n, true)
 	return m.put(n, false)
@@ -668,6 +678,9 @@ func (m *Model) candidates(line string) (string, []string) {
 				}
 				for _, loc := range col.Data.Requests() {
 					all = append(all, loc.Item.Name)
+					for _, r := range loc.Item.Response {
+						all = append(all, r.Name)
+					}
 				}
 			}
 		}

@@ -260,7 +260,8 @@ type CollectionPatch struct {
 // dash and the id. A bare id is looked up in the API key's own account,
 // where a teammate's collection and its requests aren't. Item paths name
 // the collection itself by its bare id, though (a uid there reads as
-// moving the item to another collection).
+// moving the item to another collection), except to make an item in a
+// teammate's collection: see create.
 
 // SplitUID splits a uid into the owner's id and the id; a bare id has no
 // owner.
@@ -321,13 +322,18 @@ func (c *Client) PatchCollection(ctx context.Context, collection string, p Colle
 		}
 	}
 	if p.Event != nil {
-		// The PATCH endpoint calls them events, and wants every script to
-		// have an id.
+		// The PATCH endpoint calls them events.
 		ev := append([]Event{}, *p.Event...)
 		for i := range ev {
-			if ev[i].Script.ID == "" {
-				ev[i].Script.ID = NewID()
+			s, err := patchScript(ev[i].Script)
+			if err != nil {
+				name := scriptNames[ev[i].Listen]
+				if name == "" {
+					name = ev[i].Listen
+				}
+				return fmt.Errorf("the collection's %s script %w", name, err)
 			}
+			ev[i].Script = s
 		}
 		col["events"] = ev
 	}
@@ -341,6 +347,42 @@ func (c *Client) PatchCollection(ctx context.Context, collection string, p Colle
 	return c.do(ctx, http.MethodPatch, "/collections/"+url.PathEscape(collection), map[string]any{"collection": col}, nil)
 }
 
+// scriptNames are the scripts by what they listen for, for messages.
+var scriptNames = map[string]string{"prerequest": "pre-request", "test": "tests"}
+
+// patchScript is a script as the collection PATCH endpoint takes it: with
+// an id, and only the fields it knows. It refuses the ones Postman added
+// to scripts since (packages, requests), which are empty in most scripts;
+// leaving out one that isn't would lose what it holds.
+func patchScript(s Script) (Script, error) {
+	if s.ID == "" {
+		s.ID = NewID()
+	}
+	for k, raw := range s.Extra {
+		var v any
+		if json.Unmarshal(raw, &v) != nil || !emptyJSON(v) {
+			return s, fmt.Errorf("has %s, which Postman's API can't save; change that script in Postman", k)
+		}
+	}
+	s.Extra = nil
+	return s, nil
+}
+
+// emptyJSON reports whether a JSON value holds nothing: null, "", {} or [].
+func emptyJSON(v any) bool {
+	switch v := v.(type) {
+	case nil:
+		return true
+	case string:
+		return v == ""
+	case map[string]any:
+		return len(v) == 0
+	case []any:
+		return len(v) == 0
+	}
+	return false
+}
+
 // itemAnswer is what the item endpoints answer.
 type itemAnswer struct {
 	Data struct {
@@ -350,15 +392,35 @@ type itemAnswer struct {
 	} `json:"data"`
 }
 
+// create makes an item of a kind (requests, folders, responses) in a
+// collection (by its uid); query, when set, starts with "?". The bare id
+// finds only the API key's own collections: in a teammate's, the API
+// can't find the collection, and the uid finds it. Nothing was made
+// then, so asking again makes it once.
+func (c *Client) create(ctx context.Context, collection, kind, query string, body, out any) error {
+	err := c.do(ctx, http.MethodPost, itemsPath(collection, kind)+query, body, out)
+	if owner, _ := SplitUID(collection); owner != "" && collectionNotFound(err) {
+		err = c.do(ctx, http.MethodPost, "/collections/"+url.PathEscape(collection)+"/"+kind+query, body, out)
+	}
+	return err
+}
+
+// collectionNotFound reports whether the API couldn't find the collection
+// (and not something in it).
+func collectionNotFound(err error) bool {
+	var e *Error
+	return errors.As(err, &e) && e.Status == http.StatusNotFound && strings.Contains(e.Message, "collection")
+}
+
 // CreateRequest adds a request to a collection (by its uid), in a folder
 // when folder is not empty, and returns its id.
 func (c *Client) CreateRequest(ctx context.Context, collection, folder string, it *Item) (string, error) {
-	path := itemsPath(collection, "requests")
+	query := ""
 	if folder != "" {
-		path += "?folder=" + url.QueryEscape(itemRef(collection, folder))
+		query = "?folder=" + url.QueryEscape(itemRef(collection, folder))
 	}
 	var out itemAnswer
-	err := c.do(ctx, http.MethodPost, path, requestBody(it), &out)
+	err := c.create(ctx, collection, "requests", query, requestBody(it), &out)
 	return out.Data.ID, err
 }
 
@@ -399,7 +461,7 @@ func (c *Client) CreateFolder(ctx context.Context, collection, parent string, it
 		body["folder"] = itemRef(collection, parent)
 	}
 	var out itemAnswer
-	err := c.do(ctx, http.MethodPost, itemsPath(collection, "folders"), body, &out)
+	err := c.create(ctx, collection, "folders", "", body, &out)
 	return out.Data.ID, err
 }
 
@@ -419,7 +481,7 @@ func (c *Client) DeleteFolder(ctx context.Context, collection, id string) error 
 // uid) and returns its id.
 func (c *Client) CreateResponse(ctx context.Context, collection, request string, r *Response) (string, error) {
 	var out itemAnswer
-	err := c.do(ctx, http.MethodPost, itemsPath(collection, "responses")+"?request="+url.QueryEscape(itemRef(collection, request)), responseBody(r), &out)
+	err := c.create(ctx, collection, "responses", "?request="+url.QueryEscape(itemRef(collection, request)), responseBody(r), &out)
 	return out.Data.ID, err
 }
 

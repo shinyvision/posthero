@@ -142,11 +142,10 @@ func (m *Model) refreshHints() {
 		m.editor.backend.SetHints(file, nil)
 		return
 	}
-	_, it, _ := m.findItem(m.open.colID, m.open.itemID)
-	if it == nil {
+	text, ok := m.docText(m.open.docRef)
+	if !ok {
 		return
 	}
-	text := m.editor.text(m.open.colID, m.open.itemID, it)
 	m.editor.backend.SetHints(file, hints(text, m.scopes(m.open.colID)))
 }
 
@@ -177,7 +176,9 @@ func hints(text string, set *vars.Set) []editor.Hint {
 		}
 		if strings.HasPrefix(l, "### ") {
 			name := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(l, "###")))
-			inScript = strings.HasPrefix(name, "pre") || strings.HasPrefix(name, "test") || strings.HasPrefix(name, "description")
+			// Scripts and text say {{variables}} as they are; so does an
+			// example's response, which came back that way.
+			inScript = strings.HasPrefix(name, "pre") || strings.HasPrefix(name, "test") || strings.HasPrefix(name, "description") || strings.HasPrefix(name, "response")
 			continue
 		}
 		if inScript || !strings.Contains(l, "{{") {
@@ -225,7 +226,7 @@ func hints(text string, set *vars.Set) []editor.Hint {
 // when variables, query lines or path variables make it differ from what
 // the line says.
 func urlHint(text string, set *vars.Set) (editor.Hint, bool) {
-	it, err := reqdoc.Apply(&postman.Item{}, text)
+	it, err := reqdoc.Apply(&postman.Item{}, reqdoc.RequestPart(text))
 	if err != nil || it.Request == nil || it.Request.URL == nil {
 		return editor.Hint{}, false
 	}

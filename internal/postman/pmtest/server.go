@@ -477,6 +477,16 @@ func (s *Server) patchCollection(c *collection, body []byte) (any, *apiErr) {
 			if e.Script.ID == "" {
 				return nil, badRequest("Parameters required: ('id') for key: 'collection.events.script'")
 			}
+			// Postman's scripts have fields (packages, requests) this
+			// endpoint refuses.
+			if len(e.Script.Extra) > 0 {
+				var keys []string
+				for k := range e.Script.Extra {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				return nil, badRequest("Invalid parameters: ('" + strings.Join(keys, "', '") + "') for key: 'collection.events.script'")
+			}
 		}
 		col.Event = events
 	}

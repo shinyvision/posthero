@@ -1,7 +1,9 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -927,21 +929,36 @@ func (m *Model) saveCollectionSettings(c *store.Col, nc *postman.Collection, u *
 	}
 	api := m.api
 	uid := c.Summary.UID
-	desc := ""
-	if nc.Info.Description != nil {
-		desc = nc.Info.Description.Content
+	// Only what changed goes to Postman, so a teammate's change to the rest
+	// made meanwhile stays.
+	var patch postman.CollectionPatch
+	desc := descOf(nc.Info.Description)
+	if desc != descOf(c.Data.Info.Description) {
+		patch.Description = &desc
+	}
+	if !sameJSON(nc.Auth, c.Data.Auth) {
+		patch.Auth = &nc.Auth
+	}
+	if !sameJSON(nc.Event, c.Data.Event) {
+		patch.Event = &nc.Event
 	}
 	base := append([]postman.Variable(nil), c.Data.Variable...)
 	vs := nc.Variable
-	patch := postman.CollectionPatch{Description: &desc, Auth: &nc.Auth, Event: &nc.Event, Variable: &vs}
+	if !sameJSON(vs, base) {
+		patch.Variable = &vs
+	}
 	to := m.saveTarget()
 	return m.run("saving "+c.Name(), func(ctx context.Context) tea.Msg {
 		// The variables: what changed here, on top of what Postman has now.
-		if now, err := api.Collection(ctx, uid); err == nil {
-			vs = mergeByKey(base, vs, now.Variable, varKey, sameVariable)
+		if patch.Variable != nil {
+			if now, err := api.Collection(ctx, uid); err == nil {
+				vs = mergeByKey(base, vs, now.Variable, varKey, sameVariable)
+			}
 		}
-		if err := api.PatchCollection(ctx, uid, patch); err != nil {
-			return editmodal.ResultMsg{Err: err}
+		if patch != (postman.CollectionPatch{}) {
+			if err := api.PatchCollection(ctx, uid, patch); err != nil {
+				return editmodal.ResultMsg{Err: err}
+			}
 		}
 		col, err := api.Collection(ctx, uid)
 		return editmodal.ResultMsg{Then: changedMsg{colID: colID, col: col, err: err, undo: u, note: "saved the collection " + to}}
@@ -1124,6 +1141,16 @@ func varKey(v postman.Variable) string { return v.Key }
 
 func sameVariable(a, b postman.Variable) bool {
 	return a.Value == b.Value && a.Disabled == b.Disabled && a.Type == b.Type && descOf(a.Description) == descOf(b.Description)
+}
+
+// sameJSON reports whether a and b are the same in Postman's JSON.
+func sameJSON(a, b any) bool {
+	x, err := json.Marshal(a)
+	if err != nil {
+		return false
+	}
+	y, err := json.Marshal(b)
+	return err == nil && bytes.Equal(x, y)
 }
 
 func descOf(d *postman.Description) string {

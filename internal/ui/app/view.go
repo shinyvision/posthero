@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -46,12 +47,41 @@ func (m *Model) treeWidth() int {
 	return max(16, min(m.w-30, w))
 }
 
-// editorShare is the editor's share of the right side's height.
-func (m *Model) editorShare() int {
+// editorShare is the editor's share of the right side's height, in
+// percent.
+func (m *Model) editorShare() float64 {
 	if s := m.state.EditorShare; s > 0 {
-		return max(10, min(90, s))
+		return max(5, min(95, s))
 	}
 	return 42
+}
+
+// setTreeWidth makes the tree w cells wide, leaving the request room.
+func (m *Model) setTreeWidth(w int) {
+	m.state.TreeWidth = max(16, min(m.w-30, w))
+}
+
+// setEditorHeight makes the editor h rows tall and gives the response the
+// rest; each keeps a few rows.
+func (m *Model) setEditorHeight(h int) {
+	main := max(m.h, 8) - 1
+	m.state.EditorShare = float64(max(4, min(main-4, h))) * 100 / float64(main)
+}
+
+// resize moves the tree's border dx cells to the right and the line
+// between the editor and the response dy rows down (ctrl+shift+hjkl).
+func (m *Model) resize(dx, dy int) {
+	if m.zoomed {
+		m.setStatus("one pane is zoomed · <C-w>o shows them all", false)
+		return
+	}
+	l := m.layout()
+	if dx != 0 && l.tree.visible() {
+		m.setTreeWidth(l.tree.w + dx)
+	}
+	if dy != 0 {
+		m.setEditorHeight(l.editor.h + dy)
+	}
 }
 
 func (m *Model) layout() layout {
@@ -72,14 +102,14 @@ func (m *Model) layout() layout {
 	x := 0
 	if !m.state.TreeHidden {
 		tw := m.treeWidth()
-		if w < 70 {
+		if w < 70 && m.state.TreeWidth == 0 {
 			tw = w / 3
 		}
 		l.tree = rect{0, 0, tw, main}
 		x = tw
 	}
 	right := w - x
-	eh := max(4, min(main-4, main*m.editorShare()/100))
+	eh := max(4, min(main-4, int(math.Round(float64(main)*m.editorShare()/100))))
 	l.editor = rect{x, 0, right, eh}
 	l.resp = rect{x, eh, right, main - eh}
 	return l
@@ -179,8 +209,8 @@ func (m *Model) View() tea.View {
 func (m *Model) windowTitle() string {
 	title := "posthero"
 	if m.open != nil {
-		if _, it, _ := m.findItem(m.open.colID, m.open.itemID); it != nil {
-			title = it.Name + " · posthero"
+		if name := m.docName(m.open.docRef); name != "" {
+			title = name + " · posthero"
 		}
 	}
 	return title
@@ -219,7 +249,7 @@ func (m *Model) editorBox(r rect, focused bool) string {
 	title := "request"
 	footer := ""
 	if m.open != nil {
-		if c, it, parents := m.findItem(m.open.colID, m.open.itemID); it != nil {
+		if c, it, parents, ex := m.findDoc(m.open.docRef); it != nil {
 			title = it.Name
 			var path []string
 			for _, p := range parents {
@@ -230,7 +260,10 @@ func (m *Model) editorBox(r rect, focused bool) string {
 			} else if c != nil {
 				title = c.Name() + " / " + it.Name
 			}
-			if _, draft := m.drafts.get(it.ID); draft {
+			if ex != nil {
+				title += " / " + tree.ExampleBadge + " " + ex.Name
+			}
+			if _, draft := m.drafts.get(m.open.id()); draft {
 				title += " [+]"
 			}
 		}
@@ -487,14 +520,14 @@ func (m *Model) wincmd(k string) tea.Cmd {
 		m.state.TreeWidth, m.state.EditorShare, m.state.TreeHidden = 0, 0, false
 		m.setStatus("panes back to their sizes", false)
 	case "+", "-":
-		d := 5
+		d := 2
 		if k == "-" {
-			d = -5
+			d = -2
 		}
 		if m.focus == paneResp {
 			d = -d
 		}
-		m.state.EditorShare = m.editorShare() + d
+		m.resize(0, d)
 	case "<", ">":
 		d := 3
 		if k == "<" {
@@ -503,15 +536,15 @@ func (m *Model) wincmd(k string) tea.Cmd {
 		if m.focus != paneTree {
 			d = -d
 		}
-		m.state.TreeWidth = m.treeWidth() + d
+		m.resize(d, 0)
 	case "_":
 		if m.focus == paneResp {
-			m.state.EditorShare = 10
+			m.setEditorHeight(0)
 		} else {
-			m.state.EditorShare = 90
+			m.setEditorHeight(m.h)
 		}
 	case "|":
-		m.state.TreeWidth = m.w - 30
+		m.setTreeWidth(m.w)
 	case "quit", "quit!":
 		return m.requestQuit(k == "quit!")
 	case "writequit", "writequit!":
@@ -524,8 +557,8 @@ func (m *Model) wincmd(k string) tea.Cmd {
 		if m.savesInFlight > 0 || m.open == nil {
 			return nil
 		}
-		if d, ok := m.drafts.get(m.open.itemID); ok {
-			return m.saveRequest(m.open.colID, m.open.itemID, d)
+		if d, ok := m.drafts.get(m.open.id()); ok {
+			return m.saveDoc(m.open.docRef, d)
 		}
 		return nil
 	case "<Esc>":

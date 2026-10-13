@@ -3,6 +3,9 @@ package postman_test
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -20,6 +23,47 @@ func TestClientAgainstFake(t *testing.T) {
 	bad := postman.NewClient("wrong", srv.Start())
 	if _, err := bad.Me(context.Background()); !postman.IsUnauthorized(err) {
 		t.Errorf("a wrong key: %v", err)
+	}
+}
+
+// TestCreateInTeammatesCollection: the API looks a bare collection id up
+// in the API key's own account, so making something in a teammate's
+// collection takes its uid.
+func TestCreateInTeammatesCollection(t *testing.T) {
+	const uid = "2000-c0ffee00-0000-4000-8000-000000000001"
+	var calls []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		if !strings.HasPrefix(r.URL.Path, "/collections/"+uid+"/") {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"error":{"name":"instanceNotFoundError","message":"We could not find the collection you are looking for"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"data":{"id":"made"}}`)
+	}))
+	defer srv.Close()
+	c := postman.NewClient("key", srv.URL)
+	ctx := context.Background()
+
+	req, err := c.CreateRequest(ctx, uid, "f1", &postman.Item{Name: "New", Request: &postman.Request{Method: "GET", URL: postman.ParseURL("http://x")}})
+	if err != nil || req != "made" {
+		t.Fatalf("request: %q %v", req, err)
+	}
+	folder, err := c.CreateFolder(ctx, uid, "", &postman.Item{Name: "New", Folder: true})
+	if err != nil || folder != "made" {
+		t.Fatalf("folder: %q %v", folder, err)
+	}
+	ex, err := c.CreateResponse(ctx, uid, "r1", &postman.Response{Name: "OK", Code: 200})
+	if err != nil || ex != "made" {
+		t.Fatalf("example: %q %v", ex, err)
+	}
+	want := []string{
+		"POST /collections/c0ffee00-0000-4000-8000-000000000001/requests", "POST /collections/" + uid + "/requests",
+		"POST /collections/c0ffee00-0000-4000-8000-000000000001/folders", "POST /collections/" + uid + "/folders",
+		"POST /collections/c0ffee00-0000-4000-8000-000000000001/responses", "POST /collections/" + uid + "/responses",
+	}
+	if strings.Join(calls, "\n") != strings.Join(want, "\n") {
+		t.Errorf("calls:\n%s", strings.Join(calls, "\n"))
 	}
 }
 
@@ -166,6 +210,20 @@ func scenario(t *testing.T, c *postman.Client, ws string) {
 	if len(after.Response) != 1 || after.Response[0].Code != 201 || after.Response[0].Body != `{"id": 1}` {
 		t.Errorf("example: %+v", after.Response)
 	}
+	// It changes: its name, status and body, and the request it keeps.
+	ex := after.Response[0].Clone()
+	ex.Name, ex.Code, ex.Status, ex.Body = "Made", 200, "OK", `{"id": 2}`
+	ex.OriginalRequest = &postman.Request{Method: "PUT", URL: postman.ParseURL("{{base}}/users/2")}
+	if err := c.UpdateResponse(ctx, created.UID, ex); err != nil {
+		t.Fatal(err)
+	}
+	col, _ = c.Collection(ctx, created.UID)
+	after, _ = col.Find(id)
+	if len(after.Response) != 1 || after.Response[0].Name != "Made" || after.Response[0].Code != 200 || after.Response[0].Body != `{"id": 2}` {
+		t.Errorf("changed example: %+v", after.Response)
+	} else if o := after.Response[0].OriginalRequest; o == nil || o.Method != "PUT" || o.URL.Raw != "{{base}}/users/2" {
+		t.Errorf("changed example's request: %+v", o)
+	}
 	if err := c.DeleteResponse(ctx, created.UID, exID); err != nil {
 		t.Fatal(err)
 	}
@@ -211,10 +269,18 @@ func scenario(t *testing.T, c *postman.Client, ws string) {
 	if col.Info.Name != name || len(col.Variable) != 1 || len(col.Item) != 1 || col.Item[0].Name != "Renamed" || len(col.Item[0].Item) != 1 {
 		t.Errorf("after patch: %s %+v %d items", col.Info.Name, col.Variable, len(col.Item))
 	}
-	// Scripts, and taking them away again.
+	// Scripts, and taking them away again. Postman's scripts have packages
+	// and requests, which this endpoint refuses: empty, they stay out; one
+	// that holds something can't be saved here.
 	events := postman.SetScript(nil, "prerequest", "pm.variables.set('x', 1);")
+	events[0].Script.Extra = postman.Extra{"packages": json.RawMessage(`{}`), "requests": json.RawMessage(`{}`)}
 	if err := c.PatchCollection(ctx, created.UID, postman.CollectionPatch{Event: &events}); err != nil {
 		t.Fatal(err)
+	}
+	used := append([]postman.Event(nil), events...)
+	used[0].Script.Extra = postman.Extra{"packages": json.RawMessage(`{"@team/utils":{"id":"p1"}}`)}
+	if err := c.PatchCollection(ctx, created.UID, postman.CollectionPatch{Event: &used}); err == nil || err.Error() != "the collection's pre-request script has packages, which Postman's API can't save; change that script in Postman" {
+		t.Errorf("a script with packages: %v", err)
 	}
 	col, _ = c.Collection(ctx, created.UID)
 	if postman.Scripts(col.Event, "prerequest") != "pm.variables.set('x', 1);" {

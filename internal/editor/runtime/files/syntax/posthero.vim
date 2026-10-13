@@ -1,6 +1,7 @@
 " Vim syntax for posthero's request documents: the method and URL, query
 " parameters and path variables, headers, the body (JSON, GraphQL, XML,
-" text, forms) and the ### sections (scripts, auth, settings, docs).
+" text, forms) and the ### sections (scripts, auth, settings, docs). A
+" saved example ends with its ### response: headers, then the body.
 if exists('b:current_syntax')
   finish
 endif
@@ -59,6 +60,13 @@ syntax region postheroJSSec matchgroup=postheroSection start=/^###\s\+\(javascri
 syntax region postheroFields matchgroup=postheroSection start=/^###\s\+\(form\|multipart\|auth\|settings\|file\)\>.*$/ end=/^\ze###\s/ contains=postheroField,postheroOffField,postheroFile,postheroVariable keepend
 syntax region postheroDocs matchgroup=postheroSection start=/^###\s\+\(description\|docs\)\s*$/ end=/^\ze###\s/ contains=@postheroMarkdown keepend
 syntax region postheroEnv matchgroup=postheroSection start=/^###\s\+\(environment\|collection\|globals\)\>.*$/ end=/^\ze###\s/ contains=postheroField,postheroOffField,postheroVariable,postheroNote keepend
+" An example's response, to the end: its headers, a blank line, the body.
+if s:json
+  syntax region postheroRespJSON start=/^\s*[{[]/ end=/\%$/ contained contains=@postheroJSON keepend
+endif
+syntax region postheroRespXML start=/^\s*<[?!A-Za-z]/ end=/\%$/ contained contains=@postheroXML keepend
+syntax match postheroRespHeader /^[!#$%&'*+.^_`|~0-9A-Za-z-]\+:/ contained
+syntax region postheroResponse matchgroup=postheroSection start=/^###\s\+response\>.*$/ end=/\%$/ contains=postheroRespHeader,postheroRespJSON,postheroRespXML keepend
 syntax match postheroField /^\s*[^#:="{}[\][:space:]][^:=]*\ze\s*[:=]/ contained
 syntax match postheroOffField /^\s*#.*$/ contained
 syntax match postheroNote /^\s*#\s\+\(team\|only yours\|shared\).*$/ contained
@@ -72,6 +80,7 @@ highlight default link postheroParam Type
 highlight default link postheroOffParam Comment
 highlight default link postheroPathVar Type
 highlight default link postheroHeader Type
+highlight default link postheroRespHeader Type
 highlight default link postheroOffHeader Comment
 highlight default link postheroComment Comment
 highlight default link postheroSection Title

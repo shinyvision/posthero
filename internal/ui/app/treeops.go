@@ -65,7 +65,10 @@ func (m *Model) pushUndo(u undoEntry) {
 type cutState struct {
 	colID string
 	ids   []string
-	copy  bool
+	// example is the request of an example cut or copied (ids holds the
+	// example's id).
+	example string
+	copy    bool
 	// undoing says the move takes another back: it isn't one to undo.
 	undoing bool
 }
@@ -101,13 +104,22 @@ func itemUID(c *store.Col, it *postman.Item) string {
 	return ownerOf(c) + "-" + it.ID
 }
 
+// exampleUID is an example's uid, which has its collection owner's id too.
+func exampleUID(c *store.Col, r *postman.Response) string {
+	if r.UID != "" {
+		return r.UID
+	}
+	return ownerOf(c) + "-" + r.ID
+}
+
 // container is the folder new things go in for a node: the folder itself,
-// the folder a request is in, or the collection's top.
+// the folder a request (or an example's request) is in, or the
+// collection's top.
 func container(n *tree.Node) (parent *postman.Item, after *postman.Item) {
 	switch n.Kind {
 	case tree.Folder:
 		return n.Item, nil
-	case tree.Request:
+	case tree.Request, tree.Example:
 		if len(n.Parents) > 0 {
 			return n.Parents[len(n.Parents)-1], n.Item
 		}
@@ -268,6 +280,9 @@ func (m *Model) rename(n *tree.Node) tea.Cmd {
 		if name == "" || name == old {
 			return nil
 		}
+		if n.Kind == tree.Example {
+			return m.renameExample(nodeRef(n), name, true)
+		}
 		return m.setName(n.Col, n.Item, name, true)
 	}})
 }
@@ -328,6 +343,9 @@ func (m *Model) deleteNode(n *tree.Node) tea.Cmd {
 	if n == nil {
 		return nil
 	}
+	if n.Kind == tree.Example {
+		return m.deleteExample(nodeRef(n))
+	}
 	if n.Kind == tree.Collection {
 		return modal.Show(&modal.Confirm{
 			Title: "Delete the collection " + n.Name() + "?",
@@ -336,6 +354,9 @@ func (m *Model) deleteNode(n *tree.Node) tea.Cmd {
 		})
 	}
 	body := "u brings it back."
+	if k := len(n.Item.Response); n.Kind == tree.Request && k > 0 {
+		body = fmt.Sprintf("With its %d %s. u brings it all back.", k, plural(k, "example"))
+	}
 	if n.Kind == tree.Folder {
 		count := 0
 		var walk func([]*postman.Item)
@@ -685,6 +706,16 @@ func (m *Model) cutNode(n *tree.Node, copy bool) {
 		return
 	}
 	m.cut = &cutState{colID: n.Col.Summary.ID, ids: []string{n.Item.ID}, copy: copy}
+	if n.Kind == tree.Example {
+		m.cut.ids, m.cut.example = []string{n.Example.ID}, n.Item.ID
+		m.updateMarks()
+		if copy {
+			m.setStatus("copied "+n.Name()+" · p on a request (or its examples) puts a copy there, esc forgets it", false)
+		} else {
+			m.setStatus("cut "+n.Name()+" · p on another request (or its examples) moves it there, esc keeps it where it was", false)
+		}
+		return
+	}
 	m.updateMarks()
 	if copy {
 		m.setStatus("copied "+n.Name()+" · p puts a copy below the cursor, P above, esc forgets it", false)
@@ -702,6 +733,13 @@ func (m *Model) put(n *tree.Node, above bool) tea.Cmd {
 	}
 	if n == nil {
 		return nil
+	}
+	if m.cut.example != "" {
+		return m.putExample(n)
+	}
+	if n.Kind == tree.Example {
+		// Next to an example is next to its request.
+		n = &tree.Node{Kind: tree.Request, Col: n.Col, Item: n.Item, Parents: n.Parents}
 	}
 	src := m.st.Col(m.cut.colID)
 	if src == nil || src.Data == nil {

@@ -1,5 +1,6 @@
 // Package tree is the left pane: the workspace's collections, their
-// folders and requests, with vim keys to move, fold and filter.
+// folders and requests, and the requests' saved examples, with vim keys to
+// move, fold and filter.
 package tree
 
 import (
@@ -26,24 +27,33 @@ const (
 	Collection Kind = iota
 	Folder
 	Request
+	// Example is a request's saved example, under the request.
+	Example
 )
 
 // Node is a line of the tree.
 type Node struct {
 	Kind Kind
 	// Col is the node's collection; Item is the folder or request (nil for
-	// a collection), Parents the folders it is in.
+	// a collection; for an example, its request), Parents the folders it
+	// is in.
 	Col     *store.Col
 	Item    *postman.Item
 	Parents []*postman.Item
+	// Example is the example of an Example node.
+	Example *postman.Response
 	Depth   int
 	// match marks the runes of the name a filter matched.
 	match []int
 }
 
-// ID is what identifies the node: the collection's id or the item's.
+// ID is what identifies the node: the collection's id, the item's or the
+// example's.
 func (n *Node) ID() string {
-	if n.Item != nil {
+	switch {
+	case n.Example != nil:
+		return n.Example.ID
+	case n.Item != nil:
 		return n.Item.ID
 	}
 	return n.Col.Summary.ID
@@ -51,14 +61,27 @@ func (n *Node) ID() string {
 
 // Name is the node's name.
 func (n *Node) Name() string {
-	if n.Item != nil {
+	switch {
+	case n.Example != nil:
+		return n.Example.Name
+	case n.Item != nil:
 		return n.Item.Name
 	}
 	return n.Col.Name()
 }
 
 // Container reports whether the node holds others (a collection or folder).
-func (n *Node) Container() bool { return n.Kind != Request }
+func (n *Node) Container() bool { return n.Kind == Collection || n.Kind == Folder }
+
+// Foldable reports whether the node opens and closes: a collection, a
+// folder, or a request with examples.
+func (n *Node) Foldable() bool {
+	return n.Container() || n.Kind == Request && len(n.Item.Response) > 0
+}
+
+// Leaf reports whether the node is what opens in the editor: a request or
+// an example.
+func (n *Node) Leaf() bool { return n.Kind == Request || n.Kind == Example }
 
 // Path is the names from the collection to the node.
 func (n *Node) Path() string {
@@ -68,6 +91,9 @@ func (n *Node) Path() string {
 	}
 	if n.Item != nil {
 		parts = append(parts, n.Item.Name)
+	}
+	if n.Example != nil {
+		parts = append(parts, n.Example.Name)
 	}
 	return strings.Join(parts, " / ")
 }
@@ -91,15 +117,17 @@ type Model struct {
 	cols     []*store.Col
 	expanded map[string]bool
 	rows     []*Node
-	cursor   int
-	top      int
-	h        int
-	marks    Marks
-	filter   string
-	prompt   *lineinput.Model // the filter being typed
-	pending  string           // z or g
-	count    int              // typed before a command
-	scroll   int              // rows <C-d> and <C-u> move, set by a count; 0 is half the pane
+	// showing are the requests whose examples are on rows under them.
+	showing map[string]bool
+	cursor  int
+	top     int
+	h       int
+	marks   Marks
+	filter  string
+	prompt  *lineinput.Model // the filter being typed
+	pending string           // z or g
+	count   int              // typed before a command
+	scroll  int              // rows <C-d> and <C-u> move, set by a count; 0 is half the pane
 }
 
 // New returns an empty tree; expanded lists open collections and folders.
@@ -143,6 +171,7 @@ func (m *Model) Expanded() []string {
 // filter, the requests that match and the folders they are in.
 func (m *Model) rebuild() {
 	m.rows = m.rows[:0]
+	m.showing = map[string]bool{}
 	if m.filter != "" {
 		m.rebuildFiltered()
 		return
@@ -164,8 +193,14 @@ func (m *Model) addItems(c *store.Col, items []*postman.Item, parents []*postman
 			kind = Folder
 		}
 		m.rows = append(m.rows, &Node{Kind: kind, Col: c, Item: it, Parents: parents, Depth: depth})
-		if it.Folder && m.expanded[it.ID] {
+		switch {
+		case it.Folder && m.expanded[it.ID]:
 			m.addItems(c, it.Item, append(parents[:len(parents):len(parents)], it), depth+1)
+		case !it.Folder && m.expanded[it.ID] && len(it.Response) > 0:
+			m.showing[it.ID] = true
+			for _, r := range it.Response {
+				m.rows = append(m.rows, &Node{Kind: Example, Col: c, Item: it, Example: r, Parents: parents, Depth: depth + 1})
+			}
 		}
 	}
 }
@@ -174,6 +209,19 @@ func (m *Model) addItems(c *store.Col, items []*postman.Item, parents []*postman
 func filterText(c *store.Col, it *postman.Item, parents []*postman.Item) string {
 	var b strings.Builder
 	b.WriteString(it.Name)
+	b.WriteString(filterContext(c, it, parents))
+	return b.String()
+}
+
+// exampleText is what a filter matches an example against: its name, then
+// what its request is matched by.
+func exampleText(c *store.Col, it *postman.Item, r *postman.Response, parents []*postman.Item) string {
+	return r.Name + " e.g. " + it.Name + filterContext(c, it, parents)
+}
+
+// filterContext is where a request is and what it sends, for a filter.
+func filterContext(c *store.Col, it *postman.Item, parents []*postman.Item) string {
+	var b strings.Builder
 	b.WriteByte(' ')
 	b.WriteString(c.Name())
 	for _, p := range parents {
@@ -208,18 +256,25 @@ func (m *Model) rebuildFiltered() {
 			if it.Folder {
 				return true
 			}
-			text := filterText(c, it, parents)
-			if fm, ok := fuzzy.Score(m.filter, text); ok {
-				name := []rune(it.Name)
-				var match []int
+			parents = append([]*postman.Item(nil), parents...)
+			try := func(n *Node, name, text string) {
+				fm, ok := fuzzy.Score(m.filter, text)
+				if !ok {
+					return
+				}
+				runes := len([]rune(name))
 				for _, r := range fm.Runes {
-					if r < len(name) {
-						match = append(match, r)
+					if r < runes {
+						n.match = append(n.match, r)
 					}
 				}
 				exact := fuzzy.Contains(m.filter, text)
 				anyExact = anyExact || exact
-				perCol[ci] = append(perCol[ci], hit{&Node{Kind: Request, Col: c, Item: it, Parents: append([]*postman.Item(nil), parents...), match: match}, exact})
+				perCol[ci] = append(perCol[ci], hit{n, exact})
+			}
+			try(&Node{Kind: Request, Col: c, Item: it, Parents: parents}, it.Name, filterText(c, it, parents))
+			for _, r := range it.Response {
+				try(&Node{Kind: Example, Col: c, Item: it, Example: r, Parents: parents}, r.Name, exampleText(c, it, r, parents))
 			}
 			return true
 		})
@@ -236,6 +291,7 @@ func (m *Model) rebuildFiltered() {
 		}
 		m.rows = append(m.rows, &Node{Kind: Collection, Col: c})
 		var last []*postman.Item
+		var request *postman.Item // whose row is the last one
 		for _, h := range hits {
 			// The folders a hit is in, where they differ from the last hit's.
 			same := 0
@@ -244,8 +300,18 @@ func (m *Model) rebuildFiltered() {
 			}
 			for i := same; i < len(h.Parents); i++ {
 				m.rows = append(m.rows, &Node{Kind: Folder, Col: c, Item: h.Parents[i], Parents: h.Parents[:i], Depth: i + 1})
+				request = nil
 			}
 			h.Depth = len(h.Parents) + 1
+			if h.Kind == Example {
+				// An example shows under its request.
+				if request != h.Item {
+					m.rows = append(m.rows, &Node{Kind: Request, Col: c, Item: h.Item, Parents: h.Parents, Depth: h.Depth})
+				}
+				m.showing[h.Item.ID] = true
+				h.Depth++
+			}
+			request = h.Item
 			m.rows = append(m.rows, h)
 			last = h.Parents
 		}
@@ -278,12 +344,19 @@ func (m *Model) Select(id string) bool {
 			return true
 		}
 	}
-	// Open its collection and folders, then look again.
+	// Open its collection and folders (and for an example, its request),
+	// then look again.
 	for _, c := range m.cols {
 		if c.Data == nil {
 			continue
 		}
-		if it, parents := c.Data.Find(id); it != nil {
+		it, parents := c.Data.Find(id)
+		if it == nil {
+			if req, _, ps := c.Data.FindExample(id); req != nil {
+				it, parents = req, append(ps[:len(ps):len(ps)], req)
+			}
+		}
+		if it != nil {
 			m.expanded[c.Summary.ID] = true
 			for _, p := range parents {
 				m.expanded[p.ID] = true
@@ -348,9 +421,9 @@ func (m *Model) filterKey(k string) Action {
 		return Moved
 	case "<CR>":
 		m.prompt = nil
-		// Down to the first request found.
+		// Down to the first request (or example) found.
 		for i, n := range m.rows {
-			if n.Kind == Request {
+			if n.Leaf() && (n.Kind == Example || n.match != nil || !m.showing[n.Item.ID]) {
 				m.cursor = i
 				break
 			}
@@ -373,7 +446,7 @@ func (m *Model) setFilter(f string) {
 	m.cursor = 0
 	m.rebuild()
 	for i, n := range m.rows {
-		if n.Kind == Request {
+		if n.Leaf() && (n.Kind == Example || n.match != nil || !m.showing[n.Item.ID]) {
 			m.cursor = i
 			break
 		}
@@ -502,13 +575,19 @@ func (m *Model) key(k string) Action {
 			}
 			return None
 		}
+		if n.Foldable() && !m.expanded[n.ID()] && m.filter == "" {
+			// A request's examples open first; l again goes to the editor.
+			m.expanded[n.ID()] = true
+			m.rebuild()
+			return None
+		}
 		return Open
 	case "h", "<Left>":
 		n := m.Current()
 		if n == nil {
 			return None
 		}
-		if n.Container() && m.expanded[n.ID()] && m.filter == "" {
+		if n.Foldable() && m.expanded[n.ID()] && m.filter == "" {
 			m.expanded[n.ID()] = false
 			m.rebuild()
 			return None
@@ -516,12 +595,17 @@ func (m *Model) key(k string) Action {
 		m.toParent(n)
 	case "o", "<Tab>":
 		n := m.Current()
-		if n != nil && n.Container() {
+		if n != nil && n.Foldable() {
 			m.fold(n, "a")
 			return None
 		}
 		if n != nil && k == "o" {
 			return Open
+		}
+		if n != nil && n.Kind == Example {
+			// Tab on an example folds its request's examples.
+			m.fold(n, "c")
+			return None
 		}
 		return Pass
 	case "<CR>":
@@ -555,6 +639,9 @@ func (m *Model) keepOn(n *Node) {
 		return
 	}
 	ids := []string{n.ID()}
+	if n.Kind == Example {
+		ids = append(ids, n.Item.ID)
+	}
 	for i := len(n.Parents) - 1; i >= 0; i-- {
 		ids = append(ids, n.Parents[i].ID)
 	}
@@ -579,7 +666,10 @@ func (m *Model) toParent(n *Node) {
 		return
 	}
 	target := n.Col.Summary.ID
-	if len(n.Parents) > 0 {
+	switch {
+	case n.Kind == Example:
+		target = n.Item.ID
+	case len(n.Parents) > 0:
 		target = n.Parents[len(n.Parents)-1].ID
 	}
 	for i := m.cursor - 1; i >= 0; i-- {
@@ -593,7 +683,17 @@ func (m *Model) toParent(n *Node) {
 // fold opens or closes a container: a toggles, o opens, c closes, and
 // the capitals do it for everything inside too.
 func (m *Model) fold(n *Node, how string) {
-	if !n.Container() {
+	if n.Kind == Example {
+		// On an example, folding folds its request's examples.
+		m.toParent(n)
+		n = m.Current()
+	}
+	if n.Kind == Request && n.Foldable() {
+		// A request with examples opens and closes like a folder; the
+		// capitals do just that, it has nothing inside to open.
+		how = strings.ToLower(how)
+	}
+	if !n.Foldable() {
 		// On a request, closing folds the folder it is in.
 		if how != "c" && how != "a" {
 			return
@@ -621,7 +721,7 @@ func (m *Model) fold(n *Node, how string) {
 		var walk func([]*postman.Item)
 		walk = func(list []*postman.Item) {
 			for _, it := range list {
-				if it.Folder {
+				if it.Folder || len(it.Response) > 0 {
 					m.expanded[it.ID] = on
 					walk(it.Item)
 				}
@@ -640,7 +740,7 @@ func (m *Model) expandAll() {
 			continue
 		}
 		c.Data.Walk(func(it *postman.Item, _ []*postman.Item) bool {
-			if it.Folder {
+			if it.Folder || len(it.Response) > 0 {
 				m.expanded[it.ID] = true
 			}
 			return true
@@ -712,6 +812,10 @@ func Badge(it *postman.Item) string {
 	}
 	return m
 }
+
+// ExampleBadge marks an example in the tree, where a request has its
+// method, as Postman marks them.
+const ExampleBadge = "e.g."
 
 // BadgeStyle colors a method badge: reads green, writes yellow, deletes
 // red.
@@ -794,11 +898,22 @@ func (m *Model) line(n *Node, cur, focused bool, w int) string {
 		badge := Badge(n.Item)
 		label = BadgeStyle(badge).Render(pad(badge, 4)) + " " + highlightMatch(name, n.match)
 		mark = "  "
+		if k := len(n.Item.Response); k > 0 {
+			// Its examples fold under it, like a folder's requests.
+			mark = theme.Collapsed
+			if m.showing[n.Item.ID] {
+				mark = theme.Expanded
+			}
+			label += theme.Dim.Render(" " + strconv.Itoa(k))
+		}
+	case Example:
+		label = theme.Dim.Render(ExampleBadge) + " " + highlightMatch(name, n.match)
+		mark = "  "
 	}
 	mark = theme.Dim.Render(mark)
 	right := ""
 	if n.Item != nil {
-		id := n.Item.ID
+		id := n.ID()
 		if m.marks.Cut[id] {
 			label = theme.Dim.Strikethrough(true).Render(name)
 		}
@@ -808,10 +923,16 @@ func (m *Model) line(n *Node, cur, focused bool, w int) string {
 		if m.marks.Local[id] {
 			right += theme.AccentFg.Render(" ↑")
 		}
-		if code, ok := m.marks.Status[id]; ok && n.Kind == Request {
-			right += " " + StatusStyle(code).Render(strconv.Itoa(code))
+		switch {
+		case n.Kind == Example && n.Example.Code > 0:
+			// What the example says comes back.
+			right += " " + StatusStyle(n.Example.Code).Render(strconv.Itoa(n.Example.Code))
+		case n.Kind == Request:
+			if code, ok := m.marks.Status[id]; ok {
+				right += " " + StatusStyle(code).Render(strconv.Itoa(code))
+			}
 		}
-		if m.marks.Open == id && n.Kind == Request {
+		if m.marks.Open == id && n.Leaf() {
 			mark = theme.AccentFg.Render("● ")
 		}
 	}

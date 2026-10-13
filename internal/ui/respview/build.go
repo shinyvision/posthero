@@ -185,7 +185,11 @@ func build(r *history.Record, jqOut []string, jqErr string) (lines []line, close
 		closed = append(closed, start)
 	}
 	if r.Method != "" {
-		head := theme.Dim.Render("sent ") + r.Method + " " + r.URL
+		verb := "sent "
+		if r.Example {
+			verb = "saved with " // an example's request, as it was saved
+		}
+		head := theme.Dim.Render(verb) + r.Method + " " + r.URL
 		start := b.add(line{text: theme.Dim.Render(theme.Expanded) + head, section: true, value: r.URL})
 		if r.Auth != "" {
 			b.add(line{text: "    " + theme.Dim.Render("auth  ") + r.Auth})
@@ -214,7 +218,7 @@ func build(r *history.Record, jqOut []string, jqErr string) (lines []line, close
 		b.closeFold(start, theme.Dim.Render(theme.Collapsed)+head)
 		closed = append(closed, start)
 	}
-	if r.Status > 0 {
+	if r.Status > 0 && !r.Example { // an example was never timed
 		t := r.Timings
 		head := fmt.Sprintf("%s · %s", Duration(r.Duration), send.Size(r.HeaderSize+r.WireSize))
 		if r.Proto != "" {

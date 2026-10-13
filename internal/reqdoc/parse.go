@@ -91,6 +91,9 @@ func splitSections(text string) (head []string, sections []sec, err error) {
 	for i, l := range lines {
 		if m := sectionLine.FindStringSubmatch(l); m != nil {
 			name, ok := sectionAliases[strings.ToLower(m[1])]
+			if !ok && strings.EqualFold(m[1], secResponse) {
+				return nil, nil, errorf(i+1, "### response belongs to a saved example, not to a request; :example saves the response shown as one")
+			}
 			if !ok {
 				return nil, nil, errorf(i+1, "### %s isn't a section posthero knows; sections are: %s", m[1], sectionList)
 			}
@@ -400,9 +403,10 @@ func formValue(v string, n int) (value string, file bool, contentType string, er
 // GraphQLQuery finds a document's GraphQL query: its lines as they are in
 // the document (untrimmed, so places in them map to the document's), and
 // the line (counting from 0) it starts on. ok is false when the body isn't
-// GraphQL or the document can't be read as it is.
+// GraphQL or the document can't be read as it is. In an example, it is the
+// query of the example's request.
 func GraphQLQuery(text string) (query string, line int, ok bool) {
-	d, err := parse(text)
+	d, err := parse(RequestPart(text))
 	if err != nil {
 		return "", 0, false
 	}

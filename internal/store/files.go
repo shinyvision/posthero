@@ -143,8 +143,8 @@ func hashOf(s string) string {
 // are not written to the file.
 const generatedPrefix = "ph-"
 
-// giveIDs gives items without an id one that stays the same between runs:
-// from where they are in the collection.
+// giveIDs gives items (and examples) without an id one that stays the same
+// between runs: from where they are in the collection.
 func giveIDs(c *postman.Collection, colID string) {
 	var walk func(items []*postman.Item, path string)
 	walk = func(items []*postman.Item, path string) {
@@ -152,6 +152,11 @@ func giveIDs(c *postman.Collection, colID string) {
 			p := fmt.Sprintf("%s/%d:%s", path, i, it.Name)
 			if it.ID == "" {
 				it.ID = generatedPrefix + hashOf(colID+p)
+			}
+			for j, r := range it.Response {
+				if r.ID == "" {
+					r.ID = generatedPrefix + hashOf(fmt.Sprintf("%s%s/e%d:%s", colID, p, j, r.Name))
+				}
 			}
 			walk(it.Item, p)
 		}
@@ -169,6 +174,11 @@ func FileData(c *postman.Collection) ([]byte, error) {
 	clean.Walk(func(it *postman.Item, _ []*postman.Item) bool {
 		if strings.HasPrefix(it.ID, generatedPrefix) {
 			it.ID = ""
+		}
+		for _, r := range it.Response {
+			if strings.HasPrefix(r.ID, generatedPrefix) {
+				r.ID = ""
+			}
 		}
 		return true
 	})
