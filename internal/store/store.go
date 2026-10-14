@@ -11,8 +11,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -57,11 +60,12 @@ func (e *Env) Name() string {
 
 // Store is the workspace.
 type Store struct {
-	API       *postman.Client // nil when working on files
+	API       postman.API // nil when working on files
 	Workspace postman.Workspace
 	Values    *Values
 
 	cacheDir string
+	versions map[string]uint64
 	cols     map[string]*Col
 	envs     map[string]*Env
 	globals  []postman.EnvValue
@@ -71,7 +75,7 @@ type Store struct {
 
 // Open makes the store of a workspace, with what was cached last time.
 // cacheDir and valuesDir may be empty (nothing kept on disk).
-func Open(api *postman.Client, ws postman.Workspace, cacheDir, valuesDir string) *Store {
+func Open(api postman.API, ws postman.Workspace, cacheDir, valuesDir string) *Store {
 	s := &Store{API: api, Workspace: ws, Values: NewValues(valuesDir), cols: map[string]*Col{}, envs: map[string]*Env{}}
 	if cacheDir != "" {
 		s.cacheDir = filepath.Join(cacheDir, safeName(ws.ID))
@@ -278,9 +282,9 @@ func (s *Store) SetCurrent(kind, id string, now *vars.Scope) error {
 
 // Plan is what a refresh has to compare with: what the store has now.
 type Plan struct {
+	versions  map[string]uint64
 	Workspace string
-	API       *postman.Client
-	CacheDir  string
+	API       postman.API
 	Cols      map[string]string // id → updatedAt of what is here
 	UIDs      map[string]string // id → uid of what is here
 	Envs      map[string]string
@@ -290,19 +294,27 @@ type Plan struct {
 	// the first first: Postman moves a collection's updatedAt when the
 	// collection itself changes, not when what is in it does.
 	Recheck []string
+	// RecheckEnvs forces an environment fetch after a live change, even if
+	// its timestamp hasn't advanced. Keep Envs intact to detect deletions.
+	RecheckEnvs []string
 	// Globals says to fetch the globals too.
 	Globals bool
 	// Progress, when set, hears of each collection as it comes in, and
 	// first of the list of them: the first load shows them as they come.
 	// It is called from the fetch's goroutines.
 	Progress func(Progress)
+	// Changes restricts a live refresh to these invalidated entities. A nil
+	// slice performs the ordinary workspace reconciliation, including lists
+	// and timestamp checks. Reconnects always use ordinary reconciliation.
+	Changes []postman.Change
 }
 
 // Progress is part of a fetch: the collections listed (without their
 // requests yet), or one that came in.
 type Progress struct {
-	Listed []*Col
-	Loaded *Col
+	Listed   []*Col
+	Loaded   *Col
+	versions map[string]uint64
 }
 
 // ApplyProgress takes in part of a fetch (on the UI's goroutine). It
@@ -310,13 +322,20 @@ type Progress struct {
 func (s *Store) ApplyProgress(p Progress) bool {
 	changed := false
 	for _, c := range p.Listed {
+		if p.versions != nil && p.versions["collection/"+c.Summary.ID] != s.versions["collection/"+c.Summary.ID] {
+			continue
+		}
 		if _, ok := s.cols[c.Summary.ID]; !ok {
 			s.cols[c.Summary.ID] = c
 			changed = true
 		}
 	}
 	if c := p.Loaded; c != nil {
+		if p.versions != nil && p.versions["collection/"+c.Summary.ID] != s.versions["collection/"+c.Summary.ID] {
+			return changed
+		}
 		s.cols[c.Summary.ID] = c
+		s.cacheCol(c)
 		changed = true
 	}
 	return changed
@@ -324,7 +343,10 @@ func (s *Store) ApplyProgress(p Progress) bool {
 
 // Plan returns what a refresh needs to know (on the UI's goroutine).
 func (s *Store) Plan(globals bool) Plan {
-	p := Plan{Workspace: s.Workspace.ID, API: s.API, CacheDir: s.cacheDir, Cols: map[string]string{}, UIDs: map[string]string{}, Envs: map[string]string{}, Loaded: map[string]bool{}, Globals: globals || !s.globalsKnown}
+	p := Plan{versions: maps.Clone(s.versions), Workspace: s.Workspace.ID, API: s.API, Cols: map[string]string{}, UIDs: map[string]string{}, Envs: map[string]string{}, Loaded: map[string]bool{}, Globals: globals || !s.globalsKnown}
+	if p.versions == nil {
+		p.versions = map[string]uint64{}
+	}
 	for id, c := range s.cols {
 		p.Cols[id] = c.Summary.UpdatedAt
 		p.UIDs[id] = c.Summary.UID
@@ -340,6 +362,7 @@ func (s *Store) Plan(globals bool) Plan {
 
 // Fetched is what a refresh found.
 type Fetched struct {
+	versions map[string]uint64
 	Cols     []*Col // new or changed
 	Envs     []*Env
 	Gone     []string // ids of collections no longer there
@@ -354,9 +377,12 @@ type Fetched struct {
 // Fetch asks Postman what changed since the plan, and fetches it. It runs
 // in the background.
 func Fetch(ctx context.Context, p Plan) (Fetched, error) {
-	var f Fetched
+	f := Fetched{versions: p.versions}
 	if p.API == nil {
 		return f, nil
+	}
+	if p.Changes != nil {
+		return fetchChanges(ctx, p)
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -395,8 +421,12 @@ func Fetch(ctx context.Context, p Plan) (Fetched, error) {
 			return
 		}
 		asked[id] = true
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
@@ -405,7 +435,7 @@ func Fetch(ctx context.Context, p Plan) (Fetched, error) {
 			results[id] = got{c, err}
 			mu.Unlock()
 			if err == nil && sum != nil && p.Progress != nil {
-				p.Progress(Progress{Loaded: &Col{Summary: *sum, Data: c.Clone()}})
+				p.Progress(Progress{Loaded: &Col{Summary: *sum, Data: c.Clone()}, versions: p.versions})
 			}
 		}()
 	}
@@ -431,7 +461,7 @@ func Fetch(ctx context.Context, p Plan) (Fetched, error) {
 				listed = append(listed, &Col{Summary: sum})
 			}
 		}
-		p.Progress(Progress{Listed: listed})
+		p.Progress(Progress{Listed: listed, versions: p.versions})
 	}
 	present := map[string]bool{}
 	for _, sum := range cols {
@@ -444,19 +474,22 @@ func Fetch(ctx context.Context, p Plan) (Fetched, error) {
 	for id := range p.Cols {
 		if !present[id] {
 			f.Gone = append(f.Gone, id)
-			removeCache(p.CacheDir, "collections", id)
 		}
 	}
 	presentEnv := map[string]bool{}
 	for _, sum := range envs {
 		presentEnv[sum.ID] = true
-		if at, ok := p.Envs[sum.ID]; ok && at == sum.UpdatedAt {
+		if at, ok := p.Envs[sum.ID]; ok && at == sum.UpdatedAt && !slices.Contains(p.RecheckEnvs, sum.ID) {
+			continue
+		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
 			continue
 		}
 		wg.Add(1)
 		go func(sum postman.Summary) {
 			defer wg.Done()
-			sem <- struct{}{}
 			defer func() { <-sem }()
 			e, err := p.API.Environment(ctx, sum.UID)
 			mu.Lock()
@@ -466,20 +499,21 @@ func Fetch(ctx context.Context, p Plan) (Fetched, error) {
 				return
 			}
 			f.Envs = append(f.Envs, &Env{Summary: sum, Data: e})
-			writeCache(p.CacheDir, "environments", sum.UID, cachedEnv{Summary: sum, Data: e})
 		}(sum)
 	}
 	for id := range p.Envs {
 		if !presentEnv[id] {
 			f.GoneEnvs = append(f.GoneEnvs, id)
-			removeCache(p.CacheDir, "environments", id)
 		}
 	}
 	if p.Globals {
 		g, err := p.API.Globals(ctx, p.Workspace)
 		if err == nil {
 			f.Globals, f.HasGlobals = g, true
-			writeCacheFile(p.CacheDir, "globals.json", g)
+		} else {
+			mu.Lock()
+			f.Errors = append(f.Errors, fmt.Errorf("globals: %w", err))
+			mu.Unlock()
 		}
 	}
 	wg.Wait()
@@ -492,22 +526,9 @@ func Fetch(ctx context.Context, p Plan) (Fetched, error) {
 			f.Errors = append(f.Errors, fmt.Errorf("%s: %w", sum.Name, r.err))
 		default:
 			f.Cols = append(f.Cols, &Col{Summary: sum, Data: r.col})
-			wg.Add(1)
-			go func(sum postman.Summary, c *postman.Collection) {
-				defer wg.Done()
-				writeCache(p.CacheDir, "collections", sum.UID, cachedCol{Summary: sum, Data: c})
-			}(sum, r.col)
 		}
 	}
-	wg.Wait()
 	return f, ctx.Err()
-}
-
-func writeCache(dir, kind, uid string, v any) {
-	if dir == "" {
-		return
-	}
-	writeCacheFile(dir, filepath.Join(kind, safeName(uid)+".json"), v)
 }
 
 func writeCacheFile(dir, name string, v any) {
@@ -525,16 +546,6 @@ func writeCacheFile(dir, name string, v any) {
 	_ = writeAtomic(path, data, 0o600)
 }
 
-func removeCache(dir, kind, id string) {
-	if dir == "" {
-		return
-	}
-	files, _ := filepath.Glob(filepath.Join(dir, kind, "*"+safeName(id)+".json"))
-	for _, f := range files {
-		_ = os.Remove(f)
-	}
-}
-
 // Changes says what a refresh changed, for the UI to update.
 type Changes struct {
 	Cols, Envs []string // ids
@@ -550,25 +561,50 @@ func (c Changes) Any() bool {
 // Apply takes in what a refresh fetched (on the UI's goroutine).
 func (s *Store) Apply(f Fetched) Changes {
 	var ch Changes
+	current := func(key string) bool { return f.versions == nil || f.versions[key] == s.versions[key] }
 	for _, c := range f.Cols {
+		if !current("collection/" + c.Summary.ID) {
+			continue
+		}
+		if reflect.DeepEqual(s.cols[c.Summary.ID], c) {
+			continue
+		}
 		s.cols[c.Summary.ID] = c
+		s.changed("collection/" + c.Summary.ID)
+		s.cacheCol(c)
 		ch.Cols = append(ch.Cols, c.Summary.ID)
 	}
 	for _, id := range f.Gone {
-		delete(s.cols, id)
+		if !current("collection/" + id) {
+			continue
+		}
+		s.RemoveCol(id)
 		ch.Gone = append(ch.Gone, id)
 	}
 	for _, e := range f.Envs {
+		if !current("environment/" + e.Summary.ID) {
+			continue
+		}
+		if reflect.DeepEqual(s.envs[e.Summary.ID], e) {
+			continue
+		}
 		s.envs[e.Summary.ID] = e
+		s.changed("environment/" + e.Summary.ID)
+		s.cacheEnv(e)
 		ch.Envs = append(ch.Envs, e.Summary.ID)
 	}
 	for _, id := range f.GoneEnvs {
-		delete(s.envs, id)
+		if !current("environment/" + id) {
+			continue
+		}
+		s.RemoveEnv(id)
 		ch.Gone = append(ch.Gone, id)
 	}
-	if f.HasGlobals {
+	if f.HasGlobals && current("globals") {
 		ch.Globals = !sameValues(s.globals, f.Globals)
-		s.globals, s.globalsKnown = f.Globals, true
+		if ch.Globals || !s.globalsKnown {
+			s.SetGlobals(f.Globals)
+		}
 	}
 	return ch
 }
@@ -589,10 +625,8 @@ func (s *Store) Touched(colID, updatedAt string) {
 	if updatedAt != "" {
 		c.Summary.UpdatedAt = updatedAt
 	}
-	if c.Data != nil {
-		snapshot := cachedCol{Summary: c.Summary, Data: c.Data.Clone()}
-		go writeCache(s.cacheDir, "collections", c.Summary.UID, snapshot)
-	}
+	s.changed("collection/" + c.Summary.ID)
+	s.cacheCol(c)
 }
 
 // PutCol adds or replaces a collection (one made or imported here).
@@ -604,7 +638,8 @@ func (s *Store) PutCol(c *Col) {
 // RemoveCol drops a collection.
 func (s *Store) RemoveCol(id string) {
 	if c := s.Col(id); c != nil {
-		removeCache(s.cacheDir, "collections", c.Summary.UID)
+		s.changed("collection/" + c.Summary.ID)
+		queueCache(s.cacheDir, filepath.Join("collections", safeName(c.Summary.UID)+".json"), nil)
 		delete(s.cols, c.Summary.ID)
 	}
 }
@@ -612,15 +647,15 @@ func (s *Store) RemoveCol(id string) {
 // PutEnv adds or replaces an environment.
 func (s *Store) PutEnv(e *Env) {
 	s.envs[e.Summary.ID] = e
-	if e.Data != nil {
-		writeCache(s.cacheDir, "environments", e.Summary.UID, cachedEnv{Summary: e.Summary, Data: e.Data})
-	}
+	s.changed("environment/" + e.Summary.ID)
+	s.cacheEnv(e)
 }
 
 // RemoveEnv drops an environment.
 func (s *Store) RemoveEnv(id string) {
 	if e := s.Env(id); e != nil {
-		removeCache(s.cacheDir, "environments", e.Summary.UID)
+		s.changed("environment/" + e.Summary.ID)
+		queueCache(s.cacheDir, filepath.Join("environments", safeName(e.Summary.UID)+".json"), nil)
 		delete(s.envs, e.Summary.ID)
 	}
 }
@@ -628,7 +663,11 @@ func (s *Store) RemoveEnv(id string) {
 // SetGlobals replaces the globals.
 func (s *Store) SetGlobals(values []postman.EnvValue) {
 	s.globals, s.globalsKnown = values, true
-	writeCacheFile(s.cacheDir, "globals.json", values)
+	s.changed("globals")
+	if s.cacheDir != "" {
+		snapshot := (&postman.Environment{Values: values}).Clone()
+		queueCache(s.cacheDir, "globals.json", snapshot.Values)
+	}
 }
 
 // Find looks up an item by id in every collection.

@@ -178,16 +178,27 @@ func ParseURL(raw string) *URL {
 		u.Port, host = host[i+1:], host[:i]
 	}
 	if host != "" {
-		if strings.Contains(host, "{{") {
-			u.Host = StrList{host}
-		} else {
-			u.Host = strings.Split(host, ".")
-		}
+		// The dots in {{variables}} don't split the host:
+		// api{{suffix}}.example.com is api{{suffix}}, example and com.
+		u.Host = splitOutsideBraces(host, '.')
 	}
 	if path != "" || strings.HasSuffix(base, "/") {
 		u.Path = strings.Split(path, "/")
 	}
 	return u
+}
+
+// splitOutsideBraces splits s at each c that isn't in {{braces}}.
+func splitOutsideBraces(s string, c byte) []string {
+	var out []string
+	for {
+		i := indexOutsideBraces(s, c)
+		if i < 0 {
+			return append(out, s)
+		}
+		out = append(out, s[:i])
+		s = s[i+1:]
+	}
 }
 
 func indexOutsideBraces(s string, c byte) int {

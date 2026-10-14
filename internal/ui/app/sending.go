@@ -144,11 +144,7 @@ func (m *Model) dispatch(c *store.Col, it *postman.Item, parents []*postman.Item
 	}
 	r := *m.runner
 	// The send works on a copy: the collection can change here meanwhile.
-	col := c.Data.Clone()
-	if _, ps := col.Find(it.ID); ps != nil || len(parents) == 0 {
-		parents = ps
-	}
-	target := run.Target{Collection: col, Item: it.Clone(), Parents: parents}
+	target := run.Snapshot(c.Data, it, parents)
 	prompt := m.prompter()
 	vault := m.vault
 	m.setStatus("sending "+it.Name+"…", false)

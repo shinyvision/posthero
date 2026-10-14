@@ -635,7 +635,7 @@ func (m *Model) pushTab(view *diffview.View, tab *diffview.Tab) tea.Cmd {
 }
 
 // applyMerged puts a merged document into the local copy.
-func applyMerged(ctx context.Context, api *postman.Client, ws, colUID, envUID string, cf *local.Conflict, text string) error {
+func applyMerged(ctx context.Context, api postman.API, ws, colUID, envUID string, cf *local.Conflict, text string) error {
 	switch cf.Kind {
 	case "request", "folder":
 		col, err := api.Collection(ctx, colUID)

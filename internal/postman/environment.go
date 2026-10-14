@@ -1,11 +1,5 @@
 package postman
 
-import (
-	"encoding/json"
-
-	"github.com/shinyvision/posthero/internal/jsonx"
-)
-
 // Environment is a named set of variables, like "Shop - Local".
 type Environment struct {
 	ID        string     `json:"id,omitempty"`
@@ -91,15 +85,4 @@ func (e *Environment) Get(key string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// Clone returns a deep copy.
-func (e *Environment) Clone() *Environment {
-	if e == nil {
-		return nil
-	}
-	data, _ := jsonx.Marshal(e)
-	var c Environment
-	_ = json.Unmarshal(data, &c)
-	return &c
 }

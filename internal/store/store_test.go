@@ -86,6 +86,9 @@ func TestRefreshAndScopes(t *testing.T) {
 		t.Errorf("teammate's change to the collection: %+v", ch)
 	}
 	// The cache brings it all back.
+	if err := FlushCache(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	again := Open(api, postman.Workspace{ID: "ws1"}, cache, "")
 	if c := again.Col(colID); c == nil || c.Data.Item[0].Name != "List items" || again.Env(envID) == nil || len(again.Globals()) != 1 {
 		t.Errorf("cache: %+v", again.Collections())

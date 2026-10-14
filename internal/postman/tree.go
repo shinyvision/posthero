@@ -146,30 +146,6 @@ func (c *Collection) Insert(parent *Item, i int, it *Item) {
 	(*list)[i] = it
 }
 
-// Clone returns a deep copy of the collection.
-func (c *Collection) Clone() *Collection {
-	data, _ := jsonx.Marshal(c)
-	var out Collection
-	_ = json.Unmarshal(data, &out)
-	return &out
-}
-
-// Clone returns a deep copy of the item.
-func (it *Item) Clone() *Item {
-	data, _ := jsonx.Marshal(it)
-	var out Item
-	_ = json.Unmarshal(data, &out)
-	return &out
-}
-
-// Clone returns a deep copy of the example.
-func (r *Response) Clone() *Response {
-	data, _ := jsonx.Marshal(r)
-	var out Response
-	_ = json.Unmarshal(data, &out)
-	return &out
-}
-
 // Scripts returns the text of the item's scripts for an event (prerequest
 // or test), skipping disabled ones.
 func Scripts(events []Event, listen string) string {
@@ -288,18 +264,6 @@ func (a *Auth) Keys() []string {
 	var out []string
 	for _, p := range a.Params[a.Type] {
 		out = append(out, p.Key)
-	}
-	return out
-}
-
-// Clone returns a deep copy.
-func (a *Auth) Clone() *Auth {
-	if a == nil {
-		return nil
-	}
-	out := &Auth{Type: a.Type, Params: map[string][]AuthParam{}}
-	for k, list := range a.Params {
-		out.Params[k] = append([]AuthParam(nil), list...)
 	}
 	return out
 }

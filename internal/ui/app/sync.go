@@ -20,9 +20,10 @@ import (
 	"github.com/shinyvision/posthero/internal/ui/tree"
 )
 
-// startedMsg says who the API key belongs to and which workspaces there
+// startedMsg says who the login belongs to and which workspaces there
 // are.
 type startedMsg struct {
+	api        postman.API
 	me         postman.User
 	workspaces []postman.Workspace
 	err        error
@@ -34,17 +35,20 @@ func (m *Model) start() tea.Cmd {
 	return m.run("connecting to Postman", func(ctx context.Context) tea.Msg {
 		me, err := api.Me(ctx)
 		if err != nil {
-			return startedMsg{err: err}
+			return startedMsg{api: api, err: err}
 		}
 		ws, err := api.Workspaces(ctx)
-		return startedMsg{me: me, workspaces: ws, err: err}
+		return startedMsg{api: api, me: me, workspaces: ws, err: err}
 	})
 }
 
 func (m *Model) started(msg startedMsg) tea.Cmd {
+	if msg.api != nil && msg.api != m.remote {
+		return nil
+	}
 	if msg.err != nil {
 		if postman.IsUnauthorized(msg.err) {
-			m.form = m.loginForm("Postman didn't accept the API key. Make a new one and paste it here.")
+			m.postmanLoginProblem()
 			return nil
 		}
 		m.setStatus(msg.err.Error(), true)
@@ -150,17 +154,20 @@ type fetchedMsg struct {
 	f   store.Fetched
 	err error
 	// seq says which refresh it is: only the last one counts.
-	seq int
+	seq     int
+	dirty   map[string]postman.Change
+	catchup bool
 }
 
 // progressMsg is part of the first load.
 type progressMsg struct {
-	ws string
-	p  store.Progress
+	ws  string
+	seq int
+	p   store.Progress
 }
 
 func (m *Model) progress(msg progressMsg) tea.Cmd {
-	if m.st == nil || msg.ws != m.st.Workspace.ID || m.loaded {
+	if m.st == nil || msg.ws != m.st.Workspace.ID || msg.seq != m.refreshSeq || m.loaded {
 		return nil
 	}
 	if m.st.ApplyProgress(msg.p) {
@@ -176,15 +183,51 @@ func (m *Model) progress(msg progressMsg) tea.Cmd {
 // refresh asks Postman what changed; force fetches the globals and every
 // collection too.
 func (m *Model) refresh(force bool) tea.Cmd {
+	return m.refreshMode(force, false)
+}
+
+func (m *Model) refreshMode(force, live bool) tea.Cmd {
 	if m.st == nil || m.st.API == nil || m.refreshing {
 		return nil
 	}
 	m.refreshing = true
+	watchCmd := m.ensureWatch()
 	m.refreshSeq++
 	seq := m.refreshSeq
-	m.lastRefresh = time.Now()
-	plan := m.st.Plan(force)
-	plan.Recheck = m.recheck(force)
+	catchup := m.watchState.catchup
+	if !live || force || catchup {
+		m.lastRefresh = time.Now()
+	}
+	// Workspace globals have no list timestamp or list-change notification.
+	// Reconcile them on ordinary polling/focus refreshes, while targeted live
+	// refreshes of a collection or environment avoid that extra request.
+	plan := m.st.Plan(!live || force || catchup)
+	plan.Recheck = m.recheck(force || catchup)
+	dirty := m.watchState.dirty
+	if live && !force && !catchup && m.loaded {
+		plan.Changes = make([]postman.Change, 0, len(dirty))
+		for _, ch := range dirty {
+			plan.Changes = append(plan.Changes, ch)
+		}
+	}
+	m.watchState.dirty, m.watchState.catchup = nil, false
+	for _, ch := range dirty {
+		switch ch.Kind {
+		case "collection":
+			if c := m.st.Col(ch.UID); c != nil {
+				plan.Recheck = append(plan.Recheck, c.Summary.ID)
+			}
+		case "environment":
+			if e := m.st.Env(ch.UID); e != nil {
+				plan.RecheckEnvs = append(plan.RecheckEnvs, e.Summary.ID)
+			}
+		}
+	}
+	if catchup {
+		for id := range plan.Envs {
+			plan.RecheckEnvs = append(plan.RecheckEnvs, id)
+		}
+	}
 	note := ""
 	switch {
 	case !m.loaded:
@@ -208,12 +251,12 @@ func (m *Model) refresh(force bool) tea.Cmd {
 	if !m.loaded && m.send != nil {
 		// The first load shows the collections as they come in.
 		send := m.send
-		plan.Progress = func(pr store.Progress) { send(progressMsg{ws: ws, p: pr}) }
+		plan.Progress = func(pr store.Progress) { send(progressMsg{ws: ws, seq: seq, p: pr}) }
 	}
-	return run(note, func(ctx context.Context) tea.Msg {
+	return tea.Batch(watchCmd, run(note, func(ctx context.Context) tea.Msg {
 		f, err := store.Fetch(ctx, plan)
-		return fetchedMsg{ws: ws, f: f, err: err, seq: seq}
-	})
+		return fetchedMsg{ws: ws, f: f, err: err, seq: seq, dirty: dirty, catchup: catchup}
+	}))
 }
 
 // recheck are the collections a refresh fetches again whatever Postman's
@@ -259,6 +302,18 @@ func (m *Model) fetched(msg fetchedMsg) tea.Cmd {
 		return nil // a refresh that a newer one replaced
 	}
 	m.refreshing = false
+	if msg.err != nil || len(msg.f.Errors) > 0 {
+		if m.watchState.dirty == nil {
+			m.watchState.dirty = map[string]postman.Change{}
+		}
+		for k, ch := range msg.dirty {
+			if _, newer := m.watchState.dirty[k]; !newer {
+				m.watchState.dirty[k] = ch
+			}
+		}
+		m.watchState.catchup = m.watchState.catchup || msg.catchup
+		m.watchState.retry = time.Now().Add(time.Minute)
+	}
 	asked := m.refreshAsked
 	m.refreshAsked = false
 	cmd := m.applyFetched(msg, asked)
@@ -268,7 +323,7 @@ func (m *Model) fetched(msg fetchedMsg) tea.Cmd {
 		m.refreshAsked = true
 		cmd = tea.Batch(cmd, m.refresh(true))
 	}
-	return cmd
+	return tea.Batch(cmd, m.flushWatch())
 }
 
 // applyFetched takes in what a refresh fetched; asked says it was asked
@@ -278,6 +333,9 @@ func (m *Model) applyFetched(msg fetchedMsg, asked bool) tea.Cmd {
 		return nil
 	}
 	if msg.err != nil {
+		if postman.IsUnauthorized(msg.err) && m.form == nil {
+			m.postmanLoginProblem()
+		}
 		switch {
 		case !errors.Is(msg.err, context.Canceled):
 			m.setStatus("couldn't refresh from Postman: "+msg.err.Error(), true)
@@ -296,6 +354,12 @@ func (m *Model) applyFetched(msg fetchedMsg, asked bool) tea.Cmd {
 	m.pruneDrafts()
 	if len(msg.f.Errors) > 0 {
 		m.setStatus(msg.f.Errors[0].Error(), true)
+		for _, err := range msg.f.Errors {
+			if postman.IsUnauthorized(err) && m.form == nil {
+				m.postmanLoginProblem()
+				break
+			}
+		}
 	}
 	if ch.Any() || first {
 		m.tree.SetData(m.st.Collections())

@@ -22,7 +22,11 @@ To look around first, run `posthero --demo`. It runs against a made-up workspace
 
 ## Getting started
 
-Run `posthero`. The first time, it asks for a Postman API key, which you make in Postman under your avatar → Settings → [API keys](https://go.postman.co/settings/me/api-keys). The key goes in the system keyring (Secret Service, Keychain or Credential Manager), or in posthero's own file, readable only by you, when there is no keyring. `$POSTMAN_API_KEY` works too.
+Run `posthero`. Choose **Sign in with browser** to connect your Postman account. A temporary local page opens the Postman sign-in page; choose your team and allow the browser to return to posthero. On Linux, posthero registers a `postman://` handler for that sign-in and restores the previous association afterwards. If the browser can't return (or on macOS and Windows), paste the code or callback link from Postman's success page into the local page. If Postman opens your team home instead, open the sign-in link in a private window. Esc twice in posthero cancels a pending sign-in; it expires after five minutes.
+
+The session goes in the system keyring (Secret Service, Keychain or Credential Manager), or in posthero's own file, readable only by you, when there is no keyring. When Postman supplies a refresh token and expiry, posthero renews the session before it expires, also while it is open in the background. Sessions without renewal details work too; when Postman ends a session that can't be renewed, posthero asks you to sign in again.
+
+**Use API key** connects through the public API instead. Make a key in Postman under your avatar → Settings → [API keys](https://go.postman.co/settings/me/api-keys). Existing saved keys and `$POSTMAN_API_KEY` still work. `:connect` opens browser sign-in and `:apikey` switches to an API key. The saved login selects the backend at startup.
 
 Then pick your team's workspace. posthero remembers it, along with the open request, the folders you opened and the environment of each collection. `posthero -w Backend` opens another workspace by name, and `posthero "Get locations"` opens a request by name, id or Postman link.
 
@@ -165,9 +169,11 @@ Everything goes to Postman right away, so your teammates see it in the Postman a
 
 ## Keeping up with your team
 
-posthero asks Postman what changed every 2 minutes (`:set refresh=120`), while you're using it. It pauses while the terminal is in the background or after 10 minutes without a key, and catches up when you come back. Postman doesn't say when something in a collection changed (only when the collection itself did), so these checks fetch the collection of the open request again; `R` fetches every collection, right away, and says when it is done. A request that changed while you had it open updates in the editor, unless you changed it too, in which case your version stays and posthero says so.
+With a browser session, posthero keeps a websocket open and refreshes only the collections or environments Postman reports as changed. Bursts of updates are combined, and switching workspaces releases the old subscriptions. After a dropped connection, it restores subscriptions and fetches what it may have missed. Local mode keeps its explicit `:pull` workflow.
 
-These checks cost Postman API calls, which Postman counts per team per month. One check costs two calls, and only collections that changed are fetched again. The workspace is cached on disk, so posthero starts at once and works offline with what it last saw.
+posthero also asks Postman what changed every 2 minutes (`:set refresh=120`), while you're using it. This catches additions that the sync service doesn't broadcast, and provides updates when using an API key. It pauses while the terminal is in the background or after 10 minutes without a key, and catches up when you come back. The public API doesn't say when something in a collection changed (only when the collection itself did), so these checks fetch the collection of the open request again; `R` fetches every collection, right away, and says when it is done. A request that changed while you had it open updates in the editor, unless you changed it too, in which case your version stays and posthero says so. `:set refresh=0` disables periodic checks; live updates still arrive with a browser session.
+
+With an API key, these checks cost public API calls, which Postman counts per team per month. Each check lists collections and environments, reads shared global variables, and fetches the collections it rechecks. Browser sign-in uses the desktop sync service, whose protocol is undocumented and may change. The workspace is cached on disk, so posthero starts at once and works offline with what it last saw. Older refresh results cannot replace a newer save, and queued cache writes retain the latest accepted state.
 
 ## Working locally
 
@@ -222,7 +228,7 @@ cert api.example.com ~/certs/me.pem ~/certs/me.key
 On Linux (`?` inside posthero shows where they are on your system):
 
 - `~/.config/posthero/postherorc` holds options and mappings.
-- `~/.config/posthero/login.json` holds the API key, or says it's in the keyring.
+- `~/.config/posthero/login.json` holds the login's metadata and keyring reference, or the session/API key when no keyring is available (mode 0600).
 - `~/.local/state/posthero/` holds drafts, your values of variables, tokens, cookies, saved logins (passwords are in the keyring) and the history.
 - `~/.cache/posthero/` holds the workspaces as last fetched.
 

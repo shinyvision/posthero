@@ -13,8 +13,8 @@ import (
 // items into it. Every field posthero edits is always sent, so a value that
 // was removed is removed on the server too.
 
-// requestBody is a request item in the item endpoints' format.
-func requestBody(it *Item) map[string]any {
+// RequestFields is a request item in the item endpoints' format.
+func RequestFields(it *Item) map[string]any {
 	req := it.Request
 	if req == nil {
 		req = &Request{Method: http.MethodGet, URL: &URL{}}
@@ -87,8 +87,8 @@ func requestBody(it *Item) map[string]any {
 	return out
 }
 
-// folderBody is a folder in the item endpoints' format.
-func folderBody(it *Item) map[string]any {
+// FolderFields is a folder in the item endpoints' format.
+func FolderFields(it *Item) map[string]any {
 	return map[string]any{
 		"name":        it.Name,
 		"description": descriptionItem(it.Description),
@@ -97,8 +97,8 @@ func folderBody(it *Item) map[string]any {
 	}
 }
 
-// responseBody is an example in the item endpoints' format.
-func responseBody(r *Response) map[string]any {
+// ResponseFields is an example in the item endpoints' format.
+func ResponseFields(r *Response) map[string]any {
 	out := map[string]any{
 		"name":         r.Name,
 		"responseCode": map[string]any{"code": r.Code, "name": r.Status},
@@ -112,7 +112,7 @@ func responseBody(r *Response) map[string]any {
 		out["cookies"] = r.Cookie
 	}
 	if r.OriginalRequest != nil {
-		out["requestObject"] = requestBody(&Item{Name: r.Name, Request: r.OriginalRequest})
+		out["requestObject"] = RequestFields(&Item{Name: r.Name, Request: r.OriginalRequest})
 	}
 	return out
 }

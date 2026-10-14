@@ -12,8 +12,10 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/shinyvision/posthero/internal/auth"
 	"github.com/shinyvision/posthero/internal/config"
 	"github.com/shinyvision/posthero/internal/demo"
+	"github.com/shinyvision/posthero/internal/postman/signin"
 	"github.com/shinyvision/posthero/internal/secret"
 	"github.com/shinyvision/posthero/internal/ui/app"
 )
@@ -37,8 +39,9 @@ Options:
   -v, --version            print the version
 
 Connecting:
-  The first time, posthero asks for a Postman API key (it goes in the
-  system keyring). Until then it uses $POSTMAN_API_KEY.
+  Sign in with your Postman account in your browser, or use an API key.
+  The login goes in the system keyring. :connect opens browser sign-in;
+  :apikey changes the API key. $POSTMAN_API_KEY also works.
 
 Environment:
   POSTHERO_EDITOR          nvim, vim or builtin: the request editor
@@ -47,7 +50,7 @@ Environment:
 
 Files (on Linux; ? inside posthero shows where they are here):
   ~/.config/posthero/postherorc   options and key mappings
-  ~/.config/posthero/login.json   the API key (or where it is)
+  ~/.config/posthero/login.json   the login (or where it is)
   ~/.local/state/posthero/        drafts, your variable values, tokens,
                                   cookies and the history
   ~/.cache/posthero/              the workspaces as last fetched
@@ -63,6 +66,16 @@ func main() {
 }
 
 func run() error {
+	if len(os.Args) > 1 && os.Args[1] == "--postman-callback" {
+		if len(os.Args) != 4 {
+			return errors.New("invalid Postman callback arguments")
+		}
+		address, err := signin.Relay(os.Args[2], os.Args[3])
+		if err != nil {
+			return err
+		}
+		return auth.OpenURL(address)
+	}
 	flags := flag.NewFlagSet("posthero", flag.ContinueOnError)
 	flags.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	var showVersion, useDemo bool
@@ -121,9 +134,9 @@ func run() error {
 		login, ok, err := config.LoadLogin()
 		switch {
 		case err != nil && ok:
-			notices = append(notices, "couldn't read posthero's own API key ("+err.Error()+"), so using $POSTMAN_API_KEY")
+			notices = append(notices, "couldn't read posthero's own login ("+err.Error()+"), so using $POSTMAN_API_KEY")
 		case err != nil:
-			notices = append(notices, "API key: "+err.Error())
+			notices = append(notices, "Postman login: "+err.Error())
 		}
 		opts.Login, opts.HasLogin = login, ok
 		rc, err := config.LoadRC()

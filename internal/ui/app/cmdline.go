@@ -244,7 +244,8 @@ func init() {
 		{name: "mkpostherorc", short: "mk", help: "save the options to postherorc (! overwrites one that exists)", run: cmdMkrc},
 		{name: "messages", short: "mes", help: "earlier messages", run: func(m *Model, _ string, _ bool) tea.Cmd { return m.showMessages() }},
 		{name: "help", short: "h", help: "help", run: func(m *Model, _ string, _ bool) tea.Cmd { return m.showHelp() }},
-		{name: "apikey", help: "use another Postman API key", run: func(m *Model, _ string, _ bool) tea.Cmd { m.form = m.loginForm(""); return nil }},
+		{name: "connect", help: "sign in to Postman", run: func(m *Model, _ string, _ bool) tea.Cmd { m.form = m.loginForm(""); return nil }},
+		{name: "apikey", help: "use another Postman API key", run: func(m *Model, _ string, _ bool) tea.Cmd { m.form = m.apiKeyForm(""); return nil }},
 	}
 }
 

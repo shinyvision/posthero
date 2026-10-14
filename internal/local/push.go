@@ -26,7 +26,7 @@ type Pushed struct {
 // set, only what has that key goes. Afterwards it takes the team's version
 // in again, so the base is what Postman has now. A change that fails is
 // reported; the others still go.
-func (c *Copy) Push(ctx context.Context, api *postman.Client, p *Plan, overwrite map[string]bool, only string) (Pushed, error) {
+func (c *Copy) Push(ctx context.Context, api postman.API, p *Plan, overwrite map[string]bool, only string) (Pushed, error) {
 	var ops []op
 	for _, o := range p.ops {
 		if only == "" || o.key == only {
@@ -75,7 +75,7 @@ func (o op) what() string {
 // exec makes one change in Postman. ids maps what was made here to its id
 // in Postman, for what comes after it (an item in a new folder), and uids
 // maps the ids of what the push made in Postman to their uids.
-func (c *Copy) exec(ctx context.Context, api *postman.Client, o op, r *remote, ids, uids map[string]string) error {
+func (c *Copy) exec(ctx context.Context, api postman.API, o op, r *remote, ids, uids map[string]string) error {
 	id := func(x string) string {
 		if to, ok := ids[x]; ok {
 			return to
@@ -264,7 +264,7 @@ func (c *Copy) exec(ctx context.Context, api *postman.Client, o op, r *remote, i
 
 // placeItem puts an item in Postman where it is here: after the item before
 // it, or at the start of its folder.
-func (c *Copy) placeItem(ctx context.Context, api *postman.Client, o op, itemID, parent string, id, uidOf func(string) string) error {
+func (c *Copy) placeItem(ctx context.Context, api postman.API, o op, itemID, parent string, id, uidOf func(string) string) error {
 	to := postman.Place{Collection: o.uid, Folder: uidOf(parent), Position: "start"}
 	if o.prev != "" {
 		to.Position, to.Next, to.NextFolder = "after", uidOf(id(o.prev)), o.prevFolder
@@ -276,7 +276,7 @@ func (c *Copy) placeItem(ctx context.Context, api *postman.Client, o op, itemID,
 // syncExamples makes a request's examples in Postman what they are here.
 // mine is the request as it is here, with the uid Postman gave it; theirs
 // is Postman's, whose examples have theirs.
-func syncExamples(ctx context.Context, api *postman.Client, uid string, mine, theirs *postman.Item, ids, uids map[string]string) error {
+func syncExamples(ctx context.Context, api postman.API, uid string, mine, theirs *postman.Item, ids, uids map[string]string) error {
 	there := map[string]*postman.Response{}
 	if theirs != nil {
 		for _, r := range theirs.Response {

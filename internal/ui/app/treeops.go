@@ -1143,7 +1143,7 @@ func madeUID(c *store.Col, made postman.Made) string {
 
 // recreateItem makes an item again with everything in it, and its saved
 // examples, in the collection uid, in parent (by its uid or id).
-func recreateItem(ctx context.Context, api *postman.Client, uid, parent string, it *postman.Item) (postman.Made, error) {
+func recreateItem(ctx context.Context, api postman.API, uid, parent string, it *postman.Item) (postman.Made, error) {
 	if it.Folder {
 		made, err := api.CreateFolder(ctx, uid, parent, it)
 		if err != nil {

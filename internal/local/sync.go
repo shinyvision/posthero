@@ -25,7 +25,7 @@ type remote struct {
 // a moment ago, and a push must not take the base for the team's version
 // of what it is about to send. A collection's time says nothing: Postman
 // moves it when the collection itself changes, not what is in it.
-func (c *Copy) fetch(ctx context.Context, api *postman.Client) (*remote, error) {
+func (c *Copy) fetch(ctx context.Context, api postman.API) (*remote, error) {
 	fresh := map[string]bool{}
 	for _, ch := range c.Changes() {
 		fresh[ch.Col], fresh[ch.Env] = true, true
@@ -157,7 +157,7 @@ type Pulled struct {
 // Pull takes in what the team changed since the base: everything that
 // didn't change here becomes the team's version. What changed here stays,
 // to be pushed (and, if the team changed it too, to be asked about then).
-func (c *Copy) Pull(ctx context.Context, api *postman.Client) (Pulled, error) {
+func (c *Copy) Pull(ctx context.Context, api postman.API) (Pulled, error) {
 	r, err := c.fetch(ctx, api)
 	if err != nil {
 		return Pulled{}, err
@@ -540,7 +540,7 @@ type op struct {
 }
 
 // Plan works out what a push would do, fetching the team's version.
-func (c *Copy) Plan(ctx context.Context, api *postman.Client) (*Plan, error) {
+func (c *Copy) Plan(ctx context.Context, api postman.API) (*Plan, error) {
 	r, err := c.fetch(ctx, api)
 	if err != nil {
 		return nil, err

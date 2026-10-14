@@ -178,7 +178,7 @@ func (m *Model) showHelp() tea.Cmd {
 		cache, _ := config.CacheDir()
 		lines = append(lines,
 			"  "+cfg+"/postherorc     options and mappings (:mkpostherorc writes it)",
-			"  "+cfg+"/login.json     the Postman API key (in your keyring)",
+			"  "+cfg+"/login.json     the Postman login (in your keyring)",
 			"  "+st+"/                drafts, your values, tokens, cookies, history",
 			"  "+cache+"/             the workspaces as last fetched")
 		var wrapped []string

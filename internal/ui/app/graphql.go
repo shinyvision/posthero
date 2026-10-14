@@ -92,7 +92,7 @@ func (m *Model) loggedInFor(colID string, it *postman.Item) bool {
 // fetchSchema sends the introspection query with the request's address,
 // auth and pre-request scripts.
 func (m *Model) fetchSchema(colID string, it *postman.Item, url string, show bool) tea.Cmd {
-	c, _, _ := m.findItem(colID, it.ID)
+	c, _, parents := m.findItem(colID, it.ID)
 	if c == nil || c.Data == nil {
 		return nil
 	}
@@ -101,13 +101,11 @@ func (m *Model) fetchSchema(colID string, it *postman.Item, url string, show boo
 		e.schema = prev.schema // still good while the new one comes
 	}
 	m.schemas[url] = e
-	col := c.Data.Clone()
-	noTests(col)
-	item := it.Clone()
+	target := run.Snapshot(c.Data, it, parents)
+	noTests(target.Collection)
+	item := target.Item
 	item.Request.Body = &postman.Body{Mode: "graphql", GraphQL: &postman.GraphQL{Query: postman.Str(graphql.IntrospectionQuery)}}
 	item.Event = withoutTests(item.Event)
-	_, parents := col.Find(it.ID)
-	target := run.Target{Collection: col, Item: item, Parents: parents}
 	set := m.scopes(colID)
 	r := *m.runner
 	parent := m.ctx

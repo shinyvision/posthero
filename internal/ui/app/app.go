@@ -22,6 +22,7 @@ import (
 	"github.com/shinyvision/posthero/internal/jsonx"
 	"github.com/shinyvision/posthero/internal/local"
 	"github.com/shinyvision/posthero/internal/postman"
+	"github.com/shinyvision/posthero/internal/postman/syncapi"
 	"github.com/shinyvision/posthero/internal/run"
 	"github.com/shinyvision/posthero/internal/script"
 	"github.com/shinyvision/posthero/internal/send"
@@ -49,7 +50,7 @@ const (
 // Options are what main hands the app.
 type Options struct {
 	Login config.Login
-	// HasLogin is false when there is no API key yet: the app asks for one
+	// HasLogin is false when there is no login yet: the app asks for one
 	// (unless Files are open).
 	HasLogin bool
 	// Files are collection and environment exports to open instead of a
@@ -57,6 +58,7 @@ type Options struct {
 	Files []string
 	// APIBase is the Postman API to use; empty is the real one.
 	APIBase string
+	Sync    syncapi.Options
 	RC      config.RC
 	State   config.State
 	// SaveState writes the state on quit; nil skips it.
@@ -88,8 +90,8 @@ type Model struct {
 
 	// api is what posthero reads and changes: Postman (remote), or the
 	// workspace's local copy in local mode (local).
-	api        *postman.Client
-	remote     *postman.Client
+	api        postman.API
+	remote     postman.API
 	local      *local.Copy
 	st         *store.Store
 	workspaces []postman.Workspace
@@ -188,6 +190,9 @@ type Model struct {
 	// refreshAsked says the refresh running was asked for (and says how it
 	// went when done); refreshAgain asks for one when the one running ends.
 	refreshAsked, refreshAgain bool
+	watchState                 watchState
+	renewing                   bool
+	nextRenew                  time.Time
 	exitNote                   string
 	ctx                        context.Context
 	stop                       context.CancelFunc
@@ -260,7 +265,7 @@ func New(o Options) *Model {
 		m.loaded = true
 		m.tree.SetData(m.st.Collections())
 	case o.HasLogin:
-		m.remote = postman.NewClient(o.Login.APIKey, o.APIBase)
+		m.remote = m.newRemote(o.Login)
 		m.api = m.remote
 		m.openWorkspace(m.startWorkspace())
 	default:
@@ -321,6 +326,9 @@ func (m *Model) startWorkspace() postman.Workspace {
 // before) and asks Postman what changed. A workspace without an id is
 // picked once the list is in.
 func (m *Model) openWorkspace(ws postman.Workspace) {
+	m.stopWatch()
+	m.refreshSeq++
+	m.refreshing, m.refreshAgain = false, false
 	if ws.ID == "" {
 		m.st = nil
 		return
@@ -357,7 +365,14 @@ func (m *Model) Init() tea.Cmd {
 
 // Close saves what posthero keeps and shuts down the editor.
 func (m *Model) Close() {
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = store.FlushCache(ctx)
+	}()
 	m.stop()
+	m.stopWatch()
+	m.closeRemote()
 	if m.edit != nil {
 		m.edit.Close()
 	}
@@ -508,6 +523,18 @@ func (m *Model) update1(msg tea.Msg) tea.Cmd {
 		return m.started(msg)
 	case loggedInMsg:
 		return m.loggedIn(msg)
+	case watchReadyMsg:
+		return m.watchReady(msg)
+	case watchChangeMsg:
+		return m.watchChanged(msg)
+	case watchFlushMsg:
+		if msg.epoch != m.watchState.epoch {
+			return nil
+		}
+		m.watchState.queued = false
+		return m.flushWatch()
+	case sessionRenewedMsg:
+		return m.sessionRenewed(msg)
 	case fetchedMsg:
 		return m.fetched(msg)
 	case progressMsg:
@@ -648,6 +675,7 @@ func (m *Model) onTick() tea.Cmd {
 		next = tick()
 	}
 	cmds := []tea.Cmd{next}
+	cmds = append(cmds, m.flushWatch(), m.renewSession())
 	// Postman: what the team changed.
 	if m.st != nil && m.st.API != nil && !m.refreshing && m.idle() && m.active() && m.stale() {
 		cmds = append(cmds, m.refresh(false))

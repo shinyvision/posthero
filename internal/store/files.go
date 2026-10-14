@@ -260,7 +260,7 @@ func (c *Conflict) Error() string {
 // CheckRequest asks Postman whether a request of a collection (by its uid)
 // changed since known (its updatedAt as posthero has it); ref is the
 // request's uid, or its id. A nil Conflict means it didn't.
-func CheckRequest(ctx context.Context, api *postman.Client, collection, ref, known string) (*Conflict, error) {
+func CheckRequest(ctx context.Context, api postman.API, collection, ref, known string) (*Conflict, error) {
 	if api == nil || known == "" {
 		return nil, nil
 	}

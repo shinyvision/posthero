@@ -12,7 +12,29 @@ import (
 
 	"github.com/shinyvision/posthero/internal/postman"
 	"github.com/shinyvision/posthero/internal/postman/pmtest"
+	"github.com/shinyvision/posthero/internal/postman/syncapi"
+	"github.com/shinyvision/posthero/internal/postman/syncapi/synctest"
 )
+
+// TestSyncClientAgainstFake holds the sync service's client to the same
+// scenario, against a fake of the service.
+func TestSyncClientAgainstFake(t *testing.T) {
+	srv := synctest.New()
+	defer srv.Close()
+	base := srv.Start()
+	c := syncapi.New(synctest.Token, syncapi.Options{URL: base, IdentityURL: base})
+	defer c.Close()
+	scenario(t, c, "ws1")
+
+	bad := syncapi.New("wrong", syncapi.Options{URL: base, IdentityURL: base})
+	defer bad.Close()
+	if _, err := bad.Me(context.Background()); !postman.IsUnauthorized(err) {
+		t.Errorf("a wrong session, me: %v", err)
+	}
+	if _, err := bad.Workspaces(context.Background()); !postman.IsUnauthorized(err) {
+		t.Errorf("a wrong session, workspaces: %v", err)
+	}
+}
 
 func TestClientAgainstFake(t *testing.T) {
 	srv := pmtest.New()
@@ -131,7 +153,20 @@ func TestClientLive(t *testing.T) {
 	scenario(t, postman.NewClient(key, ""), ws)
 }
 
-func scenario(t *testing.T, c *postman.Client, ws string) {
+// TestSyncClientLive runs the scenario against Postman's sync service. It
+// needs POSTMAN_SESSION (a session token of a posthero login) and
+// POSTHERO_LIVE_WORKSPACE.
+func TestSyncClientLive(t *testing.T) {
+	token, ws := os.Getenv("POSTMAN_SESSION"), os.Getenv("POSTHERO_LIVE_WORKSPACE")
+	if token == "" || ws == "" {
+		t.Skip("POSTMAN_SESSION and POSTHERO_LIVE_WORKSPACE are not set")
+	}
+	c := syncapi.New(token, syncapi.Options{})
+	defer c.Close()
+	scenario(t, c, ws)
+}
+
+func scenario(t *testing.T, c postman.API, ws string) {
 	ctx := context.Background()
 	me, err := c.Me(ctx)
 	if err != nil || me.ID == 0 {
@@ -337,7 +372,13 @@ func scenario(t *testing.T, c *postman.Client, ws string) {
 	}
 	used := append([]postman.Event(nil), events...)
 	used[0].Script.Extra = postman.Extra{"packages": json.RawMessage(`{"@team/utils":{"id":"p1"}}`)}
-	if err := c.PatchCollection(ctx, created.UID, postman.CollectionPatch{Event: &used}); err == nil || err.Error() != "the collection's pre-request script has packages, which Postman's API can't save; change that script in Postman" {
+	err = c.PatchCollection(ctx, created.UID, postman.CollectionPatch{Event: &used})
+	if _, api := c.(*postman.Client); api {
+		if err == nil || err.Error() != "the collection's pre-request script has packages, which Postman's API can't save; change that script in Postman" {
+			t.Errorf("a script with packages: %v", err)
+		}
+	} else if err != nil {
+		// Postman's sync service saves them, as Postman does.
 		t.Errorf("a script with packages: %v", err)
 	}
 	col, _ = c.Collection(ctx, created.UID)

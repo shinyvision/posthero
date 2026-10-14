@@ -285,7 +285,7 @@ func TestRebuildKeepsUnknownFields(t *testing.T) {
 
 func TestResponseHeaderFlags(t *testing.T) {
 	r := &Response{Name: "ok", Header: Params{{Key: "X", Value: "1", Disabled: true, Description: &Description{Content: "why"}}}}
-	h := responseBody(r)["headers"].([]map[string]any)
+	h := ResponseFields(r)["headers"].([]map[string]any)
 	if len(h) != 1 || h[0]["enabled"] != false || h[0]["description"] != "why" {
 		t.Errorf("headers: %+v", h)
 	}
@@ -309,5 +309,23 @@ func TestQueryStringEncodesSeparators(t *testing.T) {
 	u := &URL{Raw: "http://x/?x=1", Query: Params{{Key: "x", Value: "1"}, {Key: "q", Value: "a&b=c"}}}
 	if got := u.SendRaw(); got != "http://x/?x=1&q=a%26b=c" {
 		t.Errorf("SendRaw: %q", got)
+	}
+}
+
+// TestParseURLHostWithVariables: like Postman, a host splits at the dots
+// outside {{variables}}.
+func TestParseURLHostWithVariables(t *testing.T) {
+	cases := map[string][]string{
+		"https://api{{suffix}}.toegang.org/a":         {"api{{suffix}}", "toegang", "org"},
+		"https://{{ProjectID}}-db.europe-west1.app/x": {"{{ProjectID}}-db", "europe-west1", "app"},
+		"{{base}}/users":              {"{{base}}"},
+		"{{a.b}}.example.com":         {"{{a.b}}", "example", "com"},
+		"http://localhost:8080/x":     {"localhost"},
+		"https://{{host}}:{{port}}/x": {"{{host}}:{{port}}"},
+	}
+	for raw, want := range cases {
+		if got := ParseURL(raw).Host; strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Errorf("ParseURL(%q).Host = %q, want %q", raw, got, want)
+		}
 	}
 }

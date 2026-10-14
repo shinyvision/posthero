@@ -504,9 +504,9 @@ func itemNotFound(err error) bool {
 func (c *Client) CreateRequest(ctx context.Context, collection, folder string, it *Item) (Made, error) {
 	return c.create(ctx, collection, "requests", folder, func(folder string) (string, any) {
 		if folder == "" {
-			return "", requestBody(it)
+			return "", RequestFields(it)
 		}
-		return "?folder=" + url.QueryEscape(folder), requestBody(it)
+		return "?folder=" + url.QueryEscape(folder), RequestFields(it)
 	})
 }
 
@@ -514,7 +514,7 @@ func (c *Client) CreateRequest(ctx context.Context, collection, folder string, i
 // updated.
 func (c *Client) UpdateRequest(ctx context.Context, collection string, it *Item) (string, error) {
 	var out itemAnswer
-	err := c.onItem(ctx, http.MethodPut, collection, "requests", Ref(it.ID, it.UID), requestBody(it), &out)
+	err := c.onItem(ctx, http.MethodPut, collection, "requests", Ref(it.ID, it.UID), RequestFields(it), &out)
 	return out.Data.UpdatedAt, err
 }
 
@@ -543,7 +543,7 @@ func (c *Client) RequestInfo(ctx context.Context, collection, ref string) (Reque
 // empty.
 func (c *Client) CreateFolder(ctx context.Context, collection, parent string, it *Item) (Made, error) {
 	return c.create(ctx, collection, "folders", parent, func(parent string) (string, any) {
-		body := folderBody(it)
+		body := FolderFields(it)
 		if parent != "" {
 			body["folder"] = parent
 		}
@@ -554,7 +554,7 @@ func (c *Client) CreateFolder(ctx context.Context, collection, parent string, it
 // UpdateFolder saves a folder's own settings: name, description, auth and
 // scripts.
 func (c *Client) UpdateFolder(ctx context.Context, collection string, it *Item) error {
-	return c.onItem(ctx, http.MethodPut, collection, "folders", Ref(it.ID, it.UID), folderBody(it), nil)
+	return c.onItem(ctx, http.MethodPut, collection, "folders", Ref(it.ID, it.UID), FolderFields(it), nil)
 }
 
 // DeleteFolder deletes a folder of a collection and everything in it.
@@ -565,13 +565,13 @@ func (c *Client) DeleteFolder(ctx context.Context, collection, ref string) error
 // CreateResponse saves an example for a request of a collection.
 func (c *Client) CreateResponse(ctx context.Context, collection, request string, r *Response) (Made, error) {
 	return c.create(ctx, collection, "responses", request, func(request string) (string, any) {
-		return "?request=" + url.QueryEscape(request), responseBody(r)
+		return "?request=" + url.QueryEscape(request), ResponseFields(r)
 	})
 }
 
 // UpdateResponse saves an example of a collection.
 func (c *Client) UpdateResponse(ctx context.Context, collection string, r *Response) error {
-	return c.onItem(ctx, http.MethodPut, collection, "responses", Ref(r.ID, r.UID), responseBody(r), nil)
+	return c.onItem(ctx, http.MethodPut, collection, "responses", Ref(r.ID, r.UID), ResponseFields(r), nil)
 }
 
 // DeleteResponse deletes an example of a collection.
