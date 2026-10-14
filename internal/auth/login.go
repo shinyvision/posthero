@@ -48,9 +48,13 @@ func (m *Manager) loginPassword(ctx context.Context, c Config, p Prompter, as st
 	if as != "" && as != c.Username {
 		user, pass, fromSettings = as, "", false
 	}
+	fresh := as == newUser
+	if fresh {
+		user = ""
+	}
 	saved := false
 	errText := ""
-	if !fromSettings {
+	if !fromSettings && !fresh {
 		var note string
 		if user, pass, note = m.savedPassword(c, user); pass != "" {
 			saved = true
@@ -63,7 +67,11 @@ func (m *Manager) loginPassword(ctx context.Context, c Config, p Prompter, as st
 			if p == nil {
 				return nil, errNoUser
 			}
-			ans, err := p.Login(ctx, LoginPrompt{Issuer: c.Issuer(), Username: firstNonEmpty(user, m.Logins.Username(idp)), Error: errText, Remember: true})
+			def := firstNonEmpty(user, m.Logins.Username(idp))
+			if fresh {
+				def = user
+			}
+			ans, err := p.Login(ctx, LoginPrompt{Issuer: c.Issuer(), Username: def, Error: errText, Remember: true})
 			if err != nil {
 				return nil, err
 			}
@@ -206,6 +214,10 @@ func authURL(c Config, state, challenge string, force bool) (string, error) {
 	return u.String(), nil
 }
 
+// newUser, as ForceLogin's username, logs in as someone new: posthero asks
+// who, without filling in anyone's name.
+const newUser = "\x01"
+
 // ForceLogin logs in again as username (or as anyone, when empty), past
 // the identity provider's session, and keeps the token: the config's,
 // whoever it is for now.
@@ -244,7 +256,8 @@ func (m *Manager) authorize(ctx context.Context, c Config, p Prompter, old *Toke
 	if u, err := url.Parse(start); err == nil {
 		hint = u.Query().Get("login_hint")
 	}
-	if force != "" && force != "\x00" {
+	fresh := force == newUser
+	if force != "" && force != "\x00" && !fresh {
 		hint = force
 	}
 	if hint == "" && old != nil {
@@ -254,7 +267,7 @@ func (m *Manager) authorize(ctx context.Context, c Config, p Prompter, old *Toke
 		p.Status("logging in to " + c.Issuer())
 	}
 	session := c.session()
-	w := &walker{m: m, c: c, p: p, idp: idp, session: session, hint: hint, force: force != ""}
+	w := &walker{m: m, c: c, p: p, idp: idp, session: session, hint: hint, force: force != "", fresh: fresh}
 	res, err := w.walk(ctx, start)
 	var fallback *needBrowser
 	if errors.As(err, &fallback) {
@@ -319,6 +332,8 @@ type walker struct {
 	session string
 	hint    string
 	force   bool
+	// fresh says the login is for someone new: nobody's name is filled in.
+	fresh bool
 	// user and pass are what logged in; remember says to save them.
 	user, pass string
 	remember   bool
@@ -539,7 +554,7 @@ func (w *walker) fill(ctx context.Context, pg *page, f *htmlForm) (url.Values, F
 // page says, rather than the same name sent again.
 func (w *walker) userName(ctx context.Context, pg *page, again bool) (string, error) {
 	user := ""
-	if !again {
+	if !again && !w.fresh {
 		user = firstNonEmpty(w.user, w.hint, w.m.Logins.Username(w.idp))
 	}
 	if user == "" {
@@ -594,6 +609,9 @@ func (w *walker) password(ctx context.Context, pg *page, f *htmlForm, failed boo
 			msg = firstNonEmpty(pg.message, "that didn't work")
 		}
 		def := firstNonEmpty(w.user, w.hint, w.m.Logins.Username(w.idp))
+		if w.fresh {
+			def = w.user
+		}
 		if f.username() == nil {
 			// The user name was asked for on an earlier page.
 			def = firstNonEmpty(w.user, def)

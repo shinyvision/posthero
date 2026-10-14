@@ -352,7 +352,7 @@ func authSummary(a *postman.Auth, from string, set *vars.Set) string {
 	if a.Type == "oauth2" {
 		c := auth.ConfigFrom(auth.Resolve(a, set.Resolve))
 		out += fmt.Sprintf("\n\n%s at %s\nclient %s · %s", orName(c.TokenName, "a token"), c.Issuer(), c.ClientID, grantName(c.Grant))
-		out += "\n\n:token shows the token · :login logs in again · :logout forgets it"
+		out += "\n\n:token shows the token · :auth switches users · :logout forgets it"
 	}
 	return out
 }
@@ -465,6 +465,7 @@ func (m *Model) showToken() tea.Cmd {
 	}
 	opts := []modal.Option{
 		{Key: "l", Label: "Log in again", Run: func() tea.Msg { return cmdMsg{func() tea.Cmd { return m.forceLogin("") }} }},
+		{Key: "u", Label: "Switch user", Run: func() tea.Msg { return cmdMsg{func() tea.Cmd { return m.showUsers() }} }},
 		{Key: "L", Label: "Log out", Run: func() tea.Msg { return cmdMsg{func() tea.Cmd { return m.logout(false) }} }},
 	}
 	if t != nil {
@@ -571,7 +572,6 @@ func (m *Model) keepFresh() tea.Cmd {
 	if m.st == nil {
 		return nil
 	}
-	configs := map[string]auth.Config{}
 	known := map[string]bool{}
 	for _, t := range m.authm.Tokens.All() {
 		known[t.Key] = true
@@ -579,32 +579,11 @@ func (m *Model) keepFresh() tea.Cmd {
 	if len(known) == 0 {
 		return nil
 	}
-	for _, c := range m.st.Collections() {
-		if c.Data == nil {
-			continue
+	configs := m.oauthConfigs()
+	for key := range configs {
+		if !known[key] {
+			delete(configs, key)
 		}
-		var set *vars.Set
-		add := func(a *postman.Auth) {
-			if a == nil || a.Type != "oauth2" {
-				return
-			}
-			if set == nil {
-				set = m.scopes(c.Summary.ID)
-			}
-			cfg := auth.ConfigFrom(auth.Resolve(a, set.Resolve))
-			if known[cfg.Key()] {
-				configs[cfg.Key()] = cfg
-			}
-		}
-		add(c.Data.Auth)
-		c.Data.Walk(func(it *postman.Item, _ []*postman.Item) bool {
-			if it.Folder {
-				add(it.Auth)
-			} else if it.Request != nil {
-				add(it.Request.Auth)
-			}
-			return true
-		})
 	}
 	if len(configs) == 0 {
 		return nil

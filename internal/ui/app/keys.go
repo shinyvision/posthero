@@ -84,6 +84,7 @@ var bindings = []binding{
 	{"gv", inPanes, "vars", "your values of the variables (:vars)", secVars},
 	{"gE", inPanes, "editenv", "your team's values of the environment (:env edit)", secVars},
 	{"gl", inPanes, "token", "the login: who, how long it lasts; log in again or out", secVars},
+	{"gu", inPanes, "users", "the users you sign in as: switch to another, add or remove one (:auth)", secVars},
 
 	// Copying and more.
 	{"yc", inPanes, "copycurl", "copy the request as a curl command", secMore},

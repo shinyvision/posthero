@@ -188,6 +188,12 @@ func init() {
 		{name: "settings", short: "sett", help: "the folder's or collection's auth, scripts, variables and description", run: func(m *Model, _ string, _ bool) tea.Cmd { return m.editSettings(m.containerNode()) }},
 		{name: "token", short: "to", help: "the login: who, how long it lasts; log in again or out", run: func(m *Model, _ string, _ bool) tea.Cmd { return m.showToken() }},
 		{name: "login", args: "[USER]", help: "log in again (as another user)", run: func(m *Model, arg string, _ bool) tea.Cmd { return m.forceLogin(arg) }},
+		{name: "auth", args: "[USER]", help: "the users you sign in as: switch, add or remove one; with USER, work as them", complete: "user", run: func(m *Model, arg string, _ bool) tea.Cmd {
+			if arg == "" {
+				return m.showUsers()
+			}
+			return m.switchUser(arg)
+		}},
 		{name: "logout", args: "", help: "log out; :logout! forgets the saved password too", run: func(m *Model, _ string, bang bool) tea.Cmd { return m.logout(bang) }},
 		{name: "workspace", short: "ws", args: "[NAME]", help: "switch workspace", complete: "workspace", run: cmdWorkspace},
 		{name: "new", args: "[METHOD] [URL]", help: "new request here; with a URL, it is filled in", run: cmdNew},
@@ -682,6 +688,12 @@ func (m *Model) candidates(line string) (string, []string) {
 						all = append(all, r.Name)
 					}
 				}
+			}
+		}
+	case "user":
+		if cfg, _, ok := m.currentAuth(); ok {
+			for _, u := range m.authm.Users(cfg) {
+				all = append(all, u.Name)
 			}
 		}
 	case "var":

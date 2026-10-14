@@ -18,7 +18,7 @@ Or build it with Go 1.27 or newer:
 go install github.com/shinyvision/posthero/cmd/posthero@latest
 ```
 
-To look around first, run `posthero --demo`. It runs against a made-up workspace with a small shop API and its own Keycloak, all inside posthero, so nothing you do there reaches a real one. Log in as `ada` / `lovelace` when it asks.
+To look around first, run `posthero --demo`. It runs against a made-up workspace with a small shop API and its own Keycloak, all inside posthero, so nothing you do there reaches a real one. Log in as `ada` / `lovelace` when it asks, and add `grace` / `hopper` with `gu` to try switching users.
 
 ## Getting started
 
@@ -86,6 +86,26 @@ For OAuth 2.0 with a login page, the first time asks for your user name and pass
 4. When that doesn't work (the password changed, the page asks for a one-time code), it asks you. If the login page needs JavaScript, it opens your browser and catches the redirect back.
 
 Requests that log in to the same identity provider with the same client, scope and user share one token, across collections. `gl` shows the login: who, how long the token lasts, the scope and the roles, with keys to copy the token, refresh it, log in again (as someone else, with `:login USER`) or log out.
+
+### Users
+
+Working as more than one user, say an admin and a customer, is one key away. `gu` (or `:auth`) lists the users you signed in as at the request's identity provider:
+
+```
+╭─────────────────────────────────────────────────╮
+│ Users                                           │
+│ shop at localhost:8080 · client shop-web        │
+│                                                 │
+│  1   ada     ready · switches at once           │
+│ ▌2 ● grace   signed in · 4m left                │
+│                                                 │
+│ ⏎ use · 1-9 pick · a add · dd remove · esc close│
+╰─────────────────────────────────────────────────╯
+```
+
+`j` `k` move, `⏎` (or the user's number) switches to them, `a` signs in as someone new, and `dd` removes a user: their saved password, token and session. The account itself isn't touched. `:auth NAME` switches straight away, and `<Tab>` completes the name.
+
+posthero keeps each user's token and session when you switch away, so switching back is instant: it doesn't log in again. When the kept token is no longer good, posthero logs in as that user with their saved password. Other clients at the same identity provider switch with you, unless their settings name their own user.
 
 ## Environments and variables
 

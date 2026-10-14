@@ -127,6 +127,8 @@ func (m *Model) do(action string, count int) tea.Cmd {
 		return m.editEnv(m.st.Env(m.envFor(m.currentCol())))
 	case "token":
 		return m.showToken()
+	case "users":
+		return m.showUsers()
 	case "copycurl":
 		return m.copyAs("curl")
 	case "copyurl":

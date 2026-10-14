@@ -153,6 +153,8 @@ func (m *Model) showHelp() tea.Cmd {
 			"  yy yv yp       copy the line, the value, its jq path;  Y the body;  yh the headers",
 			"  K              the value in full (a JWT decoded)",
 			"  gx             open the link on the line;  gw  wrap long lines")
+		heading("Users (gu, :auth)")
+		lines = append(lines, strings.Split(usersHelp, "\n")...)
 		heading("Local mode")
 		lines = append(lines, strings.Split(localHelp, "\n")...)
 		heading("Commands")

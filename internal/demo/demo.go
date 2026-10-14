@@ -15,10 +15,13 @@ import (
 	"github.com/shinyvision/posthero/internal/postman/pmtest"
 )
 
-// The demo's login, at its Keycloak.
+// The demo's logins, at its Keycloak: a second user, to switch to with
+// :auth.
 const (
-	User     = "ada"
-	Password = "lovelace"
+	User      = "ada"
+	Password  = "lovelace"
+	User2     = "grace"
+	Password2 = "hopper"
 )
 
 // Demo is the running demo.
@@ -40,6 +43,7 @@ func Start() (*Demo, error) {
 	d.IdP.AccessTTL = 2 * time.Minute
 	idpURL := d.IdP.Start()
 	d.IdP.AddUser(idptest.User{Name: User, Password: Password})
+	d.IdP.AddUser(idptest.User{Name: User2, Password: Password2})
 	d.IdP.AddClient(idptest.Client{ID: "shop-web", Redirects: []string{"http://localhost:3000/*"}})
 	d.Shop = NewShop(d.IdP)
 	shopURL := d.Shop.Start()
