@@ -64,7 +64,7 @@ func (c *Client) sessionToken(ctx context.Context, rejected string) (string, err
 		if c.renewErr != nil && time.Now().Before(c.renewAfter) {
 			return "", c.renewErr
 		}
-		next, err := RenewSession(ctx, s, c.opts.TokenURL)
+		next, err := renewSession(ctx, s, c.opts.TokenURL, userAgent(c.opts.Version))
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
 				c.renewErr, c.renewAfter = err, time.Now().Add(time.Minute)

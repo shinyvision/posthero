@@ -108,6 +108,7 @@ func (m *Model) fetchSchema(colID string, it *postman.Item, url string, show boo
 	item.Event = withoutTests(item.Event)
 	set := m.scopes(colID)
 	r := *m.runner
+	r.Packages, _ = m.remote.(postman.PackageProvider)
 	parent := m.ctx
 	// Fetched by itself, a schema never logs anyone in; :schema may ask.
 	prompt := auth.NoLogin

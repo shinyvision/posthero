@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/shinyvision/posthero/internal/history"
+	"github.com/shinyvision/posthero/internal/postman"
 	"github.com/shinyvision/posthero/internal/run"
 	"github.com/shinyvision/posthero/internal/store"
 	"github.com/shinyvision/posthero/internal/ui/runview"
@@ -139,6 +140,7 @@ func (m *Model) startRun(c *store.Col, title string, o run.RunOptions) tea.Cmd {
 		return set
 	}
 	r := *m.runner
+	r.Packages, _ = m.remote.(postman.PackageProvider)
 	o.Prompt = m.prompter()
 	send := func(msg tea.Msg) {
 		if m.send != nil {

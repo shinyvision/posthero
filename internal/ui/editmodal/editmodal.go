@@ -37,6 +37,9 @@ type Request struct {
 	Runtime string
 	// Submit handles a write. Its command must produce a ResultMsg.
 	Submit func(text string) tea.Cmd
+	// Saved advances the editor's baseline after a successful write, before
+	// submitting any newer text that was written while it was saving.
+	Saved func()
 }
 
 // ResultMsg is the outcome of Submit. On success Then is delivered, and the
@@ -245,6 +248,9 @@ func (m *Model) Update(msg tea.Msg) (cmd tea.Cmd, closed bool) {
 			return show, false
 		}
 		var then tea.Cmd
+		if m.req.Saved != nil {
+			m.req.Saved()
+		}
 		if msg.Then != nil {
 			then = func() tea.Msg { return msg.Then }
 		}

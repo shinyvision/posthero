@@ -20,7 +20,7 @@ type readFlight struct {
 // Canceling one caller leaves the others running, while the last cancellation
 // releases the network request. Session identity is part of the key.
 func (c *Client) request(ctx context.Context, method, path string, data any, token string) (Response, error) {
-	headers := map[string]string{"x-access-token": token, "user-agent": c.agent, "x-app-version": AppVersion}
+	headers := map[string]string{"x-access-token": token, "user-agent": c.agent, "x-app-version": c.opts.Version}
 	if !readRequest(method, path) {
 		// A read started before a mutation is not a fresh read after it.
 		c.invalidateReads()

@@ -1,6 +1,7 @@
 package script
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -30,6 +31,7 @@ func (s *Session) bridge(event string) error {
 	env := s.env
 	ph := rt.NewObject()
 	set := func(name string, v any) { _ = ph.Set(name, v) }
+	set("requirePackage", s.requirePackage)
 
 	info := env.Info
 	location := info.Location
@@ -205,9 +207,14 @@ func (s *Session) bridge(event string) error {
 			return
 		}
 		id := s.hold()
+		ctx, sender := s.runCtx, env.Send
+		var snapshot *vars.Set
+		if env.Vars != nil {
+			snapshot = env.Vars.Clone()
+		}
 		go func() {
-			resp, err := s.sendRequest(payload)
-			s.later(func() {
+			resp, err := sendRequest(ctx, sender, snapshot, payload)
+			s.later(ctx, func() {
 				if !s.held[id] {
 					return // the script that asked has ended
 				}
@@ -236,6 +243,7 @@ func (s *Session) bridge(event string) error {
 		return string(data)
 	})
 	set("atob", func(text string) string {
+		text = strings.NewReplacer("-", "+", "_", "/").Replace(text)
 		data, err := base64.StdEncoding.DecodeString(strings.TrimRight(text, "=") + strings.Repeat("=", (4-len(strings.TrimRight(text, "="))%4)%4))
 		if err != nil {
 			panic(rt.NewTypeError("atob: the string isn't valid base64"))
@@ -263,15 +271,15 @@ func (s *Session) bridge(event string) error {
 }
 
 // sendRequest sends what pm.sendRequest was given.
-func (s *Session) sendRequest(payload string) (*send.Response, error) {
-	if s.env.Send == nil {
+func sendRequest(ctx context.Context, sender func(context.Context, *send.Request, *vars.Set) (*send.Response, error), snapshot *vars.Set, payload string) (*send.Response, error) {
+	if sender == nil {
 		return nil, errors.New("pm.sendRequest isn't available here")
 	}
 	req, err := sendRequestFrom(payload)
 	if err != nil {
 		return nil, err
 	}
-	return s.env.Send(s.ctx, req)
+	return sender(ctx, req, snapshot)
 }
 
 // sendRequestFrom reads pm.sendRequest's argument.
@@ -293,7 +301,9 @@ func sendRequestFrom(payload string) (*send.Request, error) {
 	if in.URL.Raw == "" {
 		return nil, fmt.Errorf("pm.sendRequest needs a URL")
 	}
-	r := &send.Request{Method: strings.ToUpper(in.Method), Header: in.Header, Body: in.Body, Auth: in.Auth, Settings: send.DefaultSettings()}
+	// Transport defaults belong to the runner: filling them here would
+	// override its proxy, CA and client certificates before sendPlain sees it.
+	r := &send.Request{Method: strings.ToUpper(in.Method), Header: in.Header, Body: in.Body, Auth: in.Auth}
 	if r.Method == "" {
 		r.Method = http.MethodGet
 	}

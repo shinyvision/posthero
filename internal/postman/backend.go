@@ -37,6 +37,8 @@ type API interface {
 	CreateRequest(ctx context.Context, collection, folder string, it *Item) (Made, error)
 	// UpdateRequest saves a request and returns when it was updated.
 	UpdateRequest(ctx context.Context, collection string, it *Item) (string, error)
+	// PatchRequest changes only the supplied properties, returning updatedAt.
+	PatchRequest(ctx context.Context, collection, ref string, p ItemPatch) (string, error)
 	DeleteRequest(ctx context.Context, collection, ref string) error
 	// RequestInfo fetches when a request last changed and by whom.
 	RequestInfo(ctx context.Context, collection, ref string) (RequestRevision, error)
@@ -46,10 +48,13 @@ type API interface {
 	// UpdateFolder saves a folder's own settings: name, description, auth
 	// and scripts.
 	UpdateFolder(ctx context.Context, collection string, it *Item) error
+	PatchFolder(ctx context.Context, collection, ref string, p ItemPatch) error
 	// DeleteFolder deletes a folder and everything in it.
 	DeleteFolder(ctx context.Context, collection, ref string) error
 	CreateResponse(ctx context.Context, collection, request string, r *Response) (Made, error)
 	UpdateResponse(ctx context.Context, collection string, r *Response) error
+	// RenameResponse changes only the example's name.
+	RenameResponse(ctx context.Context, collection, ref, name string) error
 	DeleteResponse(ctx context.Context, collection, ref string) error
 	// Transfer moves (or with copy set, copies) requests or folders to a
 	// place and returns the uids of what is there now: the copies, named

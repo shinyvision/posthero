@@ -31,6 +31,7 @@ type Runner struct {
 	Vault script.Vault
 	// ScriptTimeout ends scripts that run longer.
 	ScriptTimeout time.Duration
+	Packages      postman.PackageProvider
 }
 
 // Target is a request in its collection.
@@ -102,7 +103,18 @@ func (r *Runner) Execute(ctx context.Context, t Target, v *vars.Set, o Options) 
 	}
 	env := &script.Env{
 		Vars: v, Info: info, Request: req, Jar: r.Client.Jar, Vault: r.Vault, Timeout: r.ScriptTimeout,
-		Send: func(ctx context.Context, sr *send.Request) (*send.Response, error) { return r.sendPlain(ctx, sr, v) },
+		Send: func(ctx context.Context, sr *send.Request, snapshot *vars.Set) (*send.Response, error) {
+			return r.sendPlain(ctx, sr, snapshot)
+		},
+	}
+	if r.Packages != nil {
+		collection := ""
+		if t.Collection != nil {
+			collection = t.Collection.Info.PostmanID
+		}
+		env.Package = func(ctx context.Context, name, id string) (string, error) {
+			return r.Packages.Package(ctx, collection, name, id)
+		}
 	}
 	location := t.Location()
 	var sess *script.Session
@@ -113,11 +125,14 @@ func (r *Runner) Execute(ctx context.Context, t Target, v *vars.Set, o Options) 
 			return ex
 		}
 		for _, code := range scripts(t, "prerequest") {
-			if err := sess.Run(code, "prerequest", location); err != nil {
+			if err := sess.RunScript(code, "prerequest", location); err != nil {
 				ex.Scripts = sess.Result()
 				ex.PreErr = err
 				ex.Err = fmt.Errorf("a pre-request script failed, so the request wasn't sent: %w", err)
 				return ex
+			}
+			if sess.Result().Skip {
+				break
 			}
 		}
 		ex.Scripts = sess.Result()
@@ -158,7 +173,7 @@ func (r *Runner) Execute(ctx context.Context, t Target, v *vars.Set, o Options) 
 	if sess != nil {
 		env.Sent, env.Response = ex.Prepared, resp
 		for _, code := range scripts(t, "test") {
-			_ = sess.Run(code, "test", location) // a failing test script is reported, the rest still run
+			_ = sess.RunScript(code, "test", location) // a failing test script is reported, the rest still run
 		}
 		ex.Scripts = sess.Result()
 	}
@@ -167,11 +182,13 @@ func (r *Runner) Execute(ctx context.Context, t Target, v *vars.Set, o Options) 
 
 // scripts are the scripts for an event: the collection's, the folders'
 // (outermost first), then the request's.
-func scripts(t Target, listen string) []string {
-	var out []string
+func scripts(t Target, listen string) []postman.Script {
+	var out []postman.Script
 	add := func(events []postman.Event) {
-		if s := postman.Scripts(events, listen); strings.TrimSpace(s) != "" {
-			out = append(out, s)
+		for _, e := range events {
+			if e.Listen == listen && !e.Disabled && strings.TrimSpace(e.Script.Exec.Text()) != "" {
+				out = append(out, e.Script)
+			}
 		}
 	}
 	if t.Collection != nil {
@@ -186,12 +203,10 @@ func scripts(t Target, listen string) []string {
 
 // sendPlain sends a request of pm.sendRequest: its own auth, no scripts.
 func (r *Runner) sendPlain(ctx context.Context, sr *send.Request, v *vars.Set) (*send.Response, error) {
-	if sr.Settings.MaxRedirects == 0 {
-		timeout := sr.Settings.Timeout
-		sr.Settings = r.Settings
-		if timeout > 0 {
-			sr.Settings.Timeout = timeout
-		}
+	timeout := sr.Settings.Timeout
+	sr.Settings = r.Settings
+	if timeout > 0 {
+		sr.Settings.Timeout = timeout
 	}
 	p, err := sr.Prepare(v, send.Options{Dir: r.Dir})
 	if err != nil {

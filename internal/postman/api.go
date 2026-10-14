@@ -518,6 +518,12 @@ func (c *Client) UpdateRequest(ctx context.Context, collection string, it *Item)
 	return out.Data.UpdatedAt, err
 }
 
+func (c *Client) PatchRequest(ctx context.Context, collection, ref string, p ItemPatch) (string, error) {
+	var out itemAnswer
+	err := c.onItem(ctx, http.MethodPut, collection, "requests", ref, p.Fields(), &out)
+	return out.Data.UpdatedAt, err
+}
+
 // DeleteRequest deletes a request of a collection.
 func (c *Client) DeleteRequest(ctx context.Context, collection, ref string) error {
 	return c.onItem(ctx, http.MethodDelete, collection, "requests", ref, nil, nil)
@@ -557,6 +563,10 @@ func (c *Client) UpdateFolder(ctx context.Context, collection string, it *Item) 
 	return c.onItem(ctx, http.MethodPut, collection, "folders", Ref(it.ID, it.UID), FolderFields(it), nil)
 }
 
+func (c *Client) PatchFolder(ctx context.Context, collection, ref string, p ItemPatch) error {
+	return c.onItem(ctx, http.MethodPut, collection, "folders", ref, p.Fields(), nil)
+}
+
 // DeleteFolder deletes a folder of a collection and everything in it.
 func (c *Client) DeleteFolder(ctx context.Context, collection, ref string) error {
 	return c.onItem(ctx, http.MethodDelete, collection, "folders", ref, nil, nil)
@@ -572,6 +582,10 @@ func (c *Client) CreateResponse(ctx context.Context, collection, request string,
 // UpdateResponse saves an example of a collection.
 func (c *Client) UpdateResponse(ctx context.Context, collection string, r *Response) error {
 	return c.onItem(ctx, http.MethodPut, collection, "responses", Ref(r.ID, r.UID), ResponseFields(r), nil)
+}
+
+func (c *Client) RenameResponse(ctx context.Context, collection, ref, name string) error {
+	return c.onItem(ctx, http.MethodPut, collection, "responses", ref, map[string]any{"name": name}, nil)
 }
 
 // DeleteResponse deletes an example of a collection.

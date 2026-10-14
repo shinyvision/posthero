@@ -309,29 +309,25 @@ func (m *Model) setName(c *store.Col, it *postman.Item, name string, record bool
 	}
 	api := m.api
 	uid := c.Summary.UID
-	var changed *postman.Item
+	var ref, sel string
+	folder := false
 	if it != nil {
-		changed = it.Clone()
-		changed.Name = name
+		ref, sel, folder = postman.Ref(it.ID, it.UID), it.ID, it.Folder
 	}
 	return m.run("renaming", func(ctx context.Context) tea.Msg {
 		var err error
 		switch {
-		case changed == nil:
+		case ref == "":
 			err = api.PatchCollection(ctx, uid, postman.CollectionPatch{Name: &name})
-		case changed.Folder:
-			err = api.UpdateFolder(ctx, uid, changed)
+		case folder:
+			err = api.PatchFolder(ctx, uid, ref, postman.ItemPatch{Name: &name})
 		default:
-			_, err = api.UpdateRequest(ctx, uid, changed)
+			_, err = api.PatchRequest(ctx, uid, ref, postman.ItemPatch{Name: &name})
 		}
 		if err != nil {
 			return changedMsg{err: fmt.Errorf("couldn't rename: %w", err)}
 		}
 		col, err := api.Collection(ctx, uid)
-		sel := ""
-		if changed != nil {
-			sel = changed.ID
-		}
 		return changedMsg{colID: colID, col: col, err: err, selectID: sel, undo: u, note: "renamed to " + name}
 	})
 }

@@ -2,7 +2,9 @@ package script
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -261,7 +263,7 @@ func TestAsyncAndSendRequest(t *testing.T) {
 	defer srv.Close()
 	f := newFixture(t)
 	client := send.NewClient(nil)
-	f.env.Send = func(ctx context.Context, r *send.Request) (*send.Response, error) {
+	f.env.Send = func(ctx context.Context, r *send.Request, snapshot *vars.Set) (*send.Response, error) {
 		p, err := r.Prepare(f.env.Vars, send.Options{})
 		if err != nil {
 			return nil, err
@@ -454,7 +456,7 @@ func TestAuthUpdate(t *testing.T) {
 // A throw in pm.sendRequest's callback fails the script, as in Postman.
 func TestSendRequestCallbackError(t *testing.T) {
 	f := newFixture(t)
-	f.env.Send = func(ctx context.Context, r *send.Request) (*send.Response, error) {
+	f.env.Send = func(ctx context.Context, r *send.Request, snapshot *vars.Set) (*send.Response, error) {
 		return &send.Response{Status: 200, StatusText: "OK", Body: []byte(`{}`)}, nil
 	}
 	f.respond(200, `{}`)
@@ -505,6 +507,96 @@ setTimeout(() => {}, 10000);
 	if v, ok := f.envVars.Get("leak"); ok {
 		t.Errorf("a timer of the failed script ran later: leak = %q", v.Value)
 	}
+}
+
+func TestSendRequestStopsWithItsScript(t *testing.T) {
+	for _, code := range []string{
+		`pm.sendRequest('https://example.test', () => pm.environment.set('leaked', true)); throw Error('stop');`,
+		`await pm.sendRequest('https://example.test');`,
+	} {
+		f := newFixture(t)
+		f.env.Timeout = 50 * time.Millisecond
+		requestContext := make(chan context.Context, 1)
+		release := make(chan struct{})
+		f.env.Send = func(ctx context.Context, r *send.Request, snapshot *vars.Set) (*send.Response, error) {
+			requestContext <- ctx
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-release:
+				return &send.Response{Status: 200}, nil
+			}
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		s, err := NewEngine().NewSession(ctx, f.env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Run(code, "prerequest", nil); err == nil {
+			t.Fatal("script should fail")
+		}
+		select {
+		case sent := <-requestContext:
+			select {
+			case <-sent.Done():
+			case <-time.After(time.Second):
+				t.Error("request outlived its failed script")
+			}
+		case <-time.After(time.Second):
+			t.Error("request did not start")
+		}
+		close(release)
+		if err := s.Run(`pm.environment.set('next', true)`, "prerequest", nil); err != nil {
+			t.Errorf("previous failure poisoned next script: %v", err)
+		}
+		if _, leaked := f.envVars.Get("leaked"); leaked {
+			t.Error("late callback ran in the next script")
+		}
+		cancel()
+	}
+}
+
+func TestSendRequestSnapshotsVariables(t *testing.T) {
+	f := newFixture(t)
+	f.env.Send = func(ctx context.Context, r *send.Request, snapshot *vars.Set) (*send.Response, error) {
+		// The runtime changes the original scopes while this request resolves
+		// its URL and auth. The sender must retain the dispatch-time values.
+		for range 1000 {
+			if got := snapshot.Resolve("{{who}}"); got != "env" {
+				return nil, fmt.Errorf("request saw later variables: %s", got)
+			}
+		}
+		return &send.Response{Status: 200}, nil
+	}
+	_, err := run(t, f, "prerequest", `
+const pending = pm.sendRequest('https://example.test/{{who}}');
+for (let i = 0; i < 1000; i++) pm.environment.set('who', 'changed-' + i);
+await pending;
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAtobJWTBase64URL(t *testing.T) {
+	f := newFixture(t)
+	payload := `{"sub":"user","name":"xx😀ÿ"}`
+	encoded := base64.RawURLEncoding.EncodeToString([]byte(payload))
+	if !strings.ContainsAny(encoded, "-_") {
+		t.Fatal("fixture must exercise URL-safe characters")
+	}
+	code := fmt.Sprintf(`
+const jwt = 'header.%s.signature';
+pm.test('JWT payload', () => pm.expect(JSON.parse(atob(jwt.split('.')[1])).sub).to.equal('user'));
+pm.test('standard padded', () => pm.expect(atob('aGVsbG8=')).to.equal('hello'));
+pm.test('standard unpadded', () => pm.expect(atob('aGVsbG8')).to.equal('hello'));
+pm.test('reject invalid', () => pm.expect(() => atob('not!base64')).to.throw());
+`, encoded)
+	r, err := run(t, f, "test", code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	passed(t, r, "✓ JWT payload", "✓ standard padded", "✓ standard unpadded", "✓ reject invalid")
 }
 
 func TestResponseBodies(t *testing.T) {

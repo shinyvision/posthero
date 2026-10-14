@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -139,6 +140,14 @@ func run() error {
 			notices = append(notices, "Postman login: "+err.Error())
 		}
 		opts.Login, opts.HasLogin = login, ok
+		syncOptions, note, err := config.PostmanClient(context.Background(), ok && login.Session != nil)
+		if err != nil {
+			return err
+		}
+		opts.Sync = syncOptions
+		if note != "" {
+			notices = append(notices, note)
+		}
 		rc, err := config.LoadRC()
 		if err != nil {
 			notices = append(notices, err.Error())

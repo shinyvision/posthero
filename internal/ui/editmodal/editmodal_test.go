@@ -88,6 +88,24 @@ type errTest struct{}
 
 func (errTest) Error() string { return "no" }
 
+func TestSaveBaselineAdvancesOnlyOnSuccess(t *testing.T) {
+	base := "original"
+	var seen []string
+	m := &Model{req: Request{
+		Saved:  func() { base = "first" },
+		Submit: func(string) tea.Cmd { seen = append(seen, base); return nil },
+	}, text: "second", sent: "first", pending: true}
+	m.Update(ResultMsg{Err: errTest{}})
+	if base != "original" || len(seen) != 1 || seen[0] != "original" {
+		t.Fatal("failed save advanced the baseline before retry")
+	}
+	m.sent, m.text = "first", "second"
+	m.Update(ResultMsg{})
+	if len(seen) != 2 || seen[1] != "first" {
+		t.Fatal("queued save started before the successful baseline advanced")
+	}
+}
+
 // A write made while the previous one is still saving is saved after it,
 // through the first result's Again, and the editor closes after that.
 func TestWriteDuringSave(t *testing.T) {

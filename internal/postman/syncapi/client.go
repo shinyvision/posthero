@@ -28,12 +28,14 @@ import (
 
 // The addresses of Postman's services.
 const (
-	DefaultURL         = "https://bifrost-v10.getpostman.com"
-	DefaultIdentityURL = "https://identity-api.getpostman.com"
+	DefaultURL             = "https://bifrost-v10.getpostman.com"
+	DefaultIdentityURL     = "https://identity-api.getpostman.com"
+	DefaultRuntimeAgentURL = "https://ra.gw.postman.co/v1"
+	DefaultPackageURL      = "https://packman.pstmn.io"
 )
 
-// AppVersion is the version of Postman's desktop app this speaks as, and
-// UserAgent what that app says it is.
+// AppVersion is the fallback desktop version when no update is available
+// locally or online. UserAgent supplies the rest of the desktop profile.
 const (
 	AppVersion = "12.32.2"
 	UserAgent  = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Postman/" + AppVersion + " Chrome/138.0.7204.251 Electron/37.10.3 Safari/605.1.15"
@@ -41,10 +43,14 @@ const (
 
 // Options say where the services are; empty means Postman's.
 type Options struct {
-	URL         string
-	IdentityURL string
-	TokenURL    string
-	OnSession   func(Session) error
+	// Version is the stable desktop release checked at startup.
+	Version         string
+	URL             string
+	IdentityURL     string
+	TokenURL        string
+	RuntimeAgentURL string
+	PackageURL      string
+	OnSession       func(Session) error
 	// AppID names this installation to the service, as the desktop app
 	// does; a random one is made when it is empty.
 	AppID string
@@ -86,14 +92,23 @@ func New(token string, opts Options) *Client {
 	if opts.IdentityURL == "" {
 		opts.IdentityURL = DefaultIdentityURL
 	}
+	if opts.RuntimeAgentURL == "" {
+		opts.RuntimeAgentURL = DefaultRuntimeAgentURL
+	}
+	if opts.PackageURL == "" {
+		opts.PackageURL = DefaultPackageURL
+	}
 	if opts.AppID == "" {
 		opts.AppID = postman.NewID()
+	}
+	if !ValidAppVersion(opts.Version) {
+		opts.Version = AppVersion
 	}
 	c := &Client{
 		token:      token,
 		opts:       opts,
 		http:       &http.Client{Timeout: 30 * time.Second},
-		agent:      UserAgent + " PostmanClient/" + AppVersion + " (AppId=" + opts.AppID + ")",
+		agent:      userAgent(opts.Version) + " PostmanClient/" + opts.Version + " (AppId=" + opts.AppID + ")",
 		wsOf:       map[string]string{},
 		listings:   map[string]*listing{},
 		watches:    map[*watch]bool{},
@@ -106,7 +121,7 @@ func New(token string, opts Options) *Client {
 	c.ctx, c.cancel = context.WithCancel(context.Background())
 	c.sock = &Socket{
 		URL:       opts.URL,
-		Header:    http.Header{"User-Agent": {UserAgent}},
+		Header:    http.Header{"User-Agent": {userAgent(opts.Version)}},
 		OnEvent:   c.event,
 		OnConnect: c.reconnected,
 	}
@@ -611,6 +626,12 @@ func (c *Client) UpdateRequest(ctx context.Context, collection string, it *postm
 	return out.Data.UpdatedAt, err
 }
 
+func (c *Client) PatchRequest(ctx context.Context, collection, ref string, p postman.ItemPatch) (string, error) {
+	var out envelope[made]
+	err := c.onItem(ctx, "put", "request", collection, ref, p.Fields(), &out)
+	return out.Data.UpdatedAt, err
+}
+
 // DeleteRequest deletes a request.
 func (c *Client) DeleteRequest(ctx context.Context, collection, ref string) error {
 	return c.onItem(ctx, "delete", "request", collection, ref, nil, nil)
@@ -639,6 +660,10 @@ func (c *Client) UpdateFolder(ctx context.Context, collection string, it *postma
 	return c.onItem(ctx, "put", "folder", collection, postman.Ref(it.ID, it.UID), folderPayload(it), nil)
 }
 
+func (c *Client) PatchFolder(ctx context.Context, collection, ref string, p postman.ItemPatch) error {
+	return c.onItem(ctx, "put", "folder", collection, ref, p.Fields(), nil)
+}
+
 // DeleteFolder deletes a folder and everything in it.
 func (c *Client) DeleteFolder(ctx context.Context, collection, ref string) error {
 	return c.onItem(ctx, "delete", "folder", collection, ref, nil, nil)
@@ -654,6 +679,10 @@ func (c *Client) CreateResponse(ctx context.Context, collection, request string,
 // UpdateResponse saves an example.
 func (c *Client) UpdateResponse(ctx context.Context, collection string, r *postman.Response) error {
 	return c.onItem(ctx, "put", "response", collection, postman.Ref(r.ID, r.UID), responsePayload(r), nil)
+}
+
+func (c *Client) RenameResponse(ctx context.Context, collection, ref, name string) error {
+	return c.onItem(ctx, "put", "response", collection, ref, map[string]any{"name": name}, nil)
 }
 
 // DeleteResponse deletes an example.

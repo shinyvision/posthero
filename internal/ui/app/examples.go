@@ -238,6 +238,7 @@ const (
 type exampleWork struct {
 	busy, note string
 	undo       *undoEntry
+	nameOnly   bool
 	// undoMade is the undo of an example made, which needs its new id.
 	undoMade func(id string) *undoEntry
 	// selectID puts the tree's cursor on an item (or example); selectMade
@@ -318,7 +319,11 @@ func (m *Model) changeExample(colID, itemID string, op exampleOp, ex *postman.Re
 		case opMake:
 			made, err = api.CreateResponse(ctx, uid, req, ex)
 		case opSave:
-			err = api.UpdateResponse(ctx, uid, ex)
+			if w.nameOnly {
+				err = api.RenameResponse(ctx, uid, postman.Ref(ex.ID, ex.UID), ex.Name)
+			} else {
+				err = api.UpdateResponse(ctx, uid, ex)
+			}
 		case opDelete:
 			err = api.DeleteResponse(ctx, uid, postman.Ref(ex.ID, ex.UID))
 		}
@@ -366,7 +371,7 @@ func (m *Model) renameExample(ref docRef, name string, record bool) tea.Cmd {
 	}
 	renamed := ex.Clone()
 	renamed.Name = name
-	w := exampleWork{busy: "renaming", note: "renamed to " + name, selectID: ex.ID}
+	w := exampleWork{busy: "renaming", note: "renamed to " + name, selectID: ex.ID, nameOnly: true}
 	if old := ex.Name; record {
 		w.undo = &undoEntry{what: "rename " + old, kind: undoRestore, restore: func() tea.Cmd {
 			return m.renameExample(ref, old, false)

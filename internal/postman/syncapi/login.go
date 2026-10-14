@@ -185,7 +185,11 @@ func identityJSON(ctx context.Context, address string, body, out any) error {
 // loginRequest deliberately doesn't include request URLs, bodies or server
 // error text in errors: the PKCE verifier and tokens may appear there.
 func loginRequest(req *http.Request, out any) error {
-	req.Header.Set("User-Agent", UserAgent)
+	return loginRequestWithAgent(req, out, UserAgent)
+}
+
+func loginRequestWithAgent(req *http.Request, out any, agent string) error {
+	req.Header.Set("User-Agent", agent)
 	req.Header.Set("Accept", "application/json")
 	c := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, err := c.Do(req)
@@ -212,6 +216,10 @@ func loginRequest(req *http.Request, out any) error {
 // RenewSession follows the desktop app's refresh exchange. /renewed-token
 // is a separate acknowledgement that invalidates the old refresh token.
 func RenewSession(ctx context.Context, s Session, tokenURL string) (Session, error) {
+	return renewSession(ctx, s, tokenURL, UserAgent)
+}
+
+func renewSession(ctx context.Context, s Session, tokenURL, agent string) (Session, error) {
 	if s.RefreshToken == "" || s.UserID == 0 {
 		return Session{}, &postman.Error{Status: 401, Message: "sign in to Postman again"}
 	}
@@ -229,7 +237,7 @@ func RenewSession(ctx context.Context, s Session, tokenURL string) (Session, err
 		ExpiresIn    int64  `json:"expires_in"`
 		Result       *bool  `json:"result"`
 	}
-	if err := loginRequest(req, &out); err != nil {
+	if err := loginRequestWithAgent(req, &out, agent); err != nil {
 		return Session{}, err
 	}
 	if out.Result != nil && !*out.Result {

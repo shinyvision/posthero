@@ -61,9 +61,11 @@ type Env struct {
 	Sent     *send.Prepared
 	Response *send.Response
 	Jar      *send.Jar
-	// Send sends a request for pm.sendRequest.
-	Send  func(ctx context.Context, r *send.Request) (*send.Response, error)
-	Vault Vault
+	// Send sends a request for pm.sendRequest, using a snapshot of the
+	// variables at dispatch so scripts can keep changing their own scopes.
+	Send    func(ctx context.Context, r *send.Request, snapshot *vars.Set) (*send.Response, error)
+	Vault   Vault
+	Package PackageResolver
 	// Timeout ends a script that runs longer (0: a minute).
 	Timeout time.Duration
 }
@@ -147,7 +149,9 @@ func (e *Engine) init() error {
 			return
 		}
 		e.libs = map[string]*goja.Program{}
-		e.registry = require.NewRegistry()
+		e.registry = require.NewRegistry(require.WithLoader(func(string) ([]byte, error) {
+			return nil, require.ModuleFileDoesNotExistError // sandbox modules never read host files
+		}))
 		for name := range libFiles {
 			name := name
 			e.registry.RegisterNativeModule(name, func(rt *goja.Runtime, module *goja.Object) {
@@ -198,16 +202,20 @@ func (e *Engine) lib(name string) (*goja.Program, error) {
 // Session runs the scripts of one request (or one request of a run) in
 // one JavaScript runtime, so libraries load once.
 type Session struct {
-	e      *Engine
-	rt     *goja.Runtime
-	env    *Env
-	res    Result
-	ctx    context.Context
-	jobs   chan func()
-	holds  int
-	nextID int
-	timers map[int]*time.Timer
-	held   map[int]bool
+	e              *Engine
+	rt             *goja.Runtime
+	env            *Env
+	res            Result
+	ctx            context.Context
+	runCtx         context.Context
+	jobs           chan func()
+	holds          int
+	nextID         int
+	timers         map[int]*time.Timer
+	held           map[int]bool
+	packageIDs     map[string]string
+	packages       map[string]*goja.Object
+	packageSources map[string]string
 }
 
 // NewSession starts a runtime for env.
@@ -239,8 +247,35 @@ func (s *Session) Run(code, event string, location []string) error {
 	if strings.TrimSpace(code) == "" {
 		return nil
 	}
-	// However the script ends, what it left pending ends with it.
-	defer s.settle()
+	s.packages = map[string]*goja.Object{}
+	if s.packageSources == nil {
+		s.packageSources = map[string]string{}
+	}
+	timeout := s.env.Timeout
+	if timeout <= 0 {
+		timeout = time.Minute
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, timeout)
+	s.runCtx = ctx
+	// Stop asynchronous requests as well as timers when this script ends.
+	defer func() { cancel(); s.settle() }()
+	contextError := func() error {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("the script ran longer than %s", timeout)
+		}
+		return errors.New("cancelled")
+	}
+	interrupted := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		s.rt.Interrupt(contextError().Error())
+		close(interrupted)
+	})
+	defer func() {
+		if !stop() {
+			<-interrupted
+		}
+		s.rt.ClearInterrupt()
+	}()
 	s.env.Info.EventName = event
 	if location != nil {
 		s.env.Info.Location = location
@@ -251,16 +286,6 @@ func (s *Session) Run(code, event string, location []string) error {
 	if _, err := s.rt.RunProgram(s.e.prelude); err != nil {
 		return s.fail(fmt.Errorf("posthero's script sandbox: %w", err))
 	}
-	timeout := s.env.Timeout
-	if timeout <= 0 {
-		timeout = time.Minute
-	}
-	deadline := time.AfterFunc(timeout, func() { s.rt.Interrupt(fmt.Sprintf("the script ran longer than %s", timeout)) })
-	defer deadline.Stop()
-	stop := context.AfterFunc(s.ctx, func() { s.rt.Interrupt("cancelled") })
-	defer stop()
-	defer s.rt.ClearInterrupt()
-
 	var scriptErr error
 	done := false
 	s.rt.Set("__ph_done", func(call goja.FunctionCall) goja.Value {
@@ -280,6 +305,9 @@ func (s *Session) Run(code, event string, location []string) error {
 	}
 	// Wait for timers, requests and async tests.
 	for s.holds > 0 || !done {
+		if scriptErr != nil {
+			return s.fail(scriptErr)
+		}
 		if !done && s.holds == 0 {
 			break // a promise nothing will ever settle
 		}
@@ -288,10 +316,8 @@ func (s *Session) Run(code, event string, location []string) error {
 			if err := s.safely(job); err != nil {
 				return s.fail(describe(err))
 			}
-		case <-s.ctx.Done():
-			return s.fail(errors.New("cancelled"))
-		case <-time.After(timeout):
-			return s.fail(fmt.Errorf("the script waited longer than %s for something", timeout))
+		case <-ctx.Done():
+			return s.fail(contextError())
 		}
 	}
 	s.clearTimers()
@@ -428,10 +454,10 @@ func (s *Session) release(id int) {
 }
 
 // later runs f on the runtime's loop, from another goroutine.
-func (s *Session) later(f func()) {
+func (s *Session) later(ctx context.Context, f func()) {
 	select {
 	case s.jobs <- f:
-	case <-s.ctx.Done():
+	case <-ctx.Done():
 	}
 }
 
@@ -453,9 +479,10 @@ func (s *Session) installTimers() {
 				args = nil
 			}
 			id := s.hold()
+			ctx := s.runCtx
 			var fire func()
 			fire = func() {
-				s.later(func() {
+				s.later(ctx, func() {
 					if !s.held[id] {
 						return // cleared
 					}

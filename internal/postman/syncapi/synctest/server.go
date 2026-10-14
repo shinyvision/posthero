@@ -63,7 +63,9 @@ type Server struct {
 	// BeforeRequest can delay an acknowledgement or observe requests in a
 	// test. Configure it before Start; it runs outside the server lock.
 	BeforeRequest func(method, path string)
-	failNext      map[string]int
+	// PackageAccessControl enables the team's external package policy.
+	PackageAccessControl bool
+	failNext             map[string]int
 }
 
 // entity is a collection, folder, request, example, environment or
@@ -499,6 +501,12 @@ func (s *Server) handle(c *conn, method, raw string, data map[string]any) (answe
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
 	s.Calls[method+" "+u.Path]++
 	switch {
+	case method == "post" && u.Path == "/ws/proxy" && data["service"] == "features":
+		values := []string{}
+		if s.PackageAccessControl {
+			values = append(values, "access_control")
+		}
+		return ok(map[string]any{"data": map[string]any{"features": map[string]any{"external_package_settings": map[string]any{"value": values}}}}), nil
 	case method == "get" && u.Path == "/workspace":
 		out := []any{}
 		for _, w := range s.workspaces {

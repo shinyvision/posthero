@@ -143,6 +143,7 @@ func (m *Model) dispatch(c *store.Col, it *postman.Item, parents []*postman.Item
 		m.showRun = false
 	}
 	r := *m.runner
+	r.Packages, _ = m.remote.(postman.PackageProvider)
 	// The send works on a copy: the collection can change here meanwhile.
 	target := run.Snapshot(c.Data, it, parents)
 	prompt := m.prompter()

@@ -489,18 +489,19 @@ func (m *Model) editEnv(e *store.Env) tea.Cmd {
 	// What the editor started from: only what changes from it is saved, on
 	// top of what Postman has then.
 	base := append([]postman.EnvValue(nil), e.Data.Values...)
+	var submitted []postman.EnvValue
 	return editmodal.Open(editmodal.Request{
 		Title: "Environment · " + e.Name(), Hint: m.saveHint(), Text: strings.TrimRight(b.String(), "\n"),
 		Ext: reqdoc.Ext, Name: "environment", Tall: true,
 		Submit: func(text string) tea.Cmd {
-			values, err := parseEnvLines(text, e.Data.Values)
+			values, err := parseEnvLines(text, base)
 			if err != nil {
 				return editmodal.Fail(err)
 			}
-			cmd := m.saveEnvValues(e, base, values, m.envUndo(e))
-			base = values // a later :w goes on from this one
-			return cmd
+			submitted = values
+			return m.saveEnvValues(e, base, values, m.envUndo(e))
 		},
+		Saved: func() { base = submitted },
 	})
 }
 
@@ -605,10 +606,12 @@ func (m *Model) saveEnvValues(e *store.Env, base, values []postman.EnvValue, u *
 	uid := e.Summary.UID
 	base = append([]postman.EnvValue(nil), base...)
 	return m.run("saving "+e.Name(), func(ctx context.Context) tea.Msg {
-		if now, err := api.Environment(ctx, uid); err == nil {
-			data = now.Clone()
-			data.Values = mergeByKey(base, values, now.Values, envKey, sameEnvValue)
+		now, err := api.Environment(ctx, uid)
+		if err != nil {
+			return editmodal.ResultMsg{Err: fmt.Errorf("couldn't read the latest environment; nothing was saved: %w", err)}
 		}
+		data = now.Clone()
+		data.Values = mergeByKey(base, values, now.Values, envKey, sameEnvValue)
 		if err := api.PutEnvironment(ctx, uid, data); err != nil {
 			return editmodal.ResultMsg{Err: err}
 		}
@@ -646,9 +649,11 @@ func (m *Model) saveColVars(c *store.Col, base, vs []postman.Variable, u *undoEn
 	base = append([]postman.Variable(nil), base...)
 	return m.run("saving "+c.Name(), func(ctx context.Context) tea.Msg {
 		// What changed from base, on top of what Postman has now.
-		if now, err := api.Collection(ctx, uid); err == nil {
-			vs = mergeByKey(base, vs, now.Variable, varKey, sameVariable)
+		now, err := api.Collection(ctx, uid)
+		if err != nil {
+			return changedMsg{err: fmt.Errorf("couldn't read the latest collection; nothing was saved: %w", err)}
 		}
+		vs = mergeByKey(base, vs, now.Variable, varKey, sameVariable)
 		if err := api.PatchCollection(ctx, uid, postman.CollectionPatch{Variable: &vs}); err != nil {
 			return changedMsg{err: err}
 		}
@@ -667,18 +672,19 @@ func (m *Model) editGlobals() tea.Cmd {
 	b.WriteByte('\n')
 	writeEnvLines(&b, m.st.Globals())
 	base := append([]postman.EnvValue(nil), m.st.Globals()...)
+	var submitted []postman.EnvValue
 	return editmodal.Open(editmodal.Request{
 		Title: "Globals", Hint: m.saveHint(), Text: strings.TrimRight(b.String(), "\n"),
 		Ext: reqdoc.Ext, Name: "globals", Tall: true,
 		Submit: func(text string) tea.Cmd {
-			values, err := parseEnvLines(text, m.st.Globals())
+			values, err := parseEnvLines(text, base)
 			if err != nil {
 				return editmodal.Fail(err)
 			}
-			cmd := m.saveGlobals(base, values, m.globalsUndo())
-			base = values // a later :w goes on from this one
-			return cmd
+			submitted = values
+			return m.saveGlobals(base, values, m.globalsUndo())
 		},
+		Saved: func() { base = submitted },
 	})
 }
 
@@ -703,9 +709,11 @@ func (m *Model) saveGlobals(base, values []postman.EnvValue, u *undoEntry) tea.C
 	base = append([]postman.EnvValue(nil), base...)
 	return m.run("saving the globals", func(ctx context.Context) tea.Msg {
 		// What changed from base, on top of what Postman has now.
-		if now, err := api.Globals(ctx, ws); err == nil {
-			values = mergeByKey(base, values, now, envKey, sameEnvValue)
+		now, err := api.Globals(ctx, ws)
+		if err != nil {
+			return editmodal.ResultMsg{Err: fmt.Errorf("couldn't read the latest globals; nothing was saved: %w", err)}
 		}
+		values = mergeByKey(base, values, now, envKey, sameEnvValue)
 		if err := api.PutGlobals(ctx, ws, values); err != nil {
 			return editmodal.ResultMsg{Err: err}
 		}
@@ -788,7 +796,7 @@ func (m *Model) renameEnv(e *store.Env, name string, record bool) tea.Cmd {
 }
 
 func (m *Model) saveEnvNamed(e *store.Env, data *postman.Environment, u *undoEntry) tea.Cmd {
-	if m.st.API == nil {
+	if e.Path != "" || m.st.API == nil {
 		e.Data = data
 		e.Summary.Name = data.Name
 		if e.Path != "" {
@@ -800,7 +808,14 @@ func (m *Model) saveEnvNamed(e *store.Env, data *postman.Environment, u *undoEnt
 	}
 	api := m.api
 	uid := e.Summary.UID
+	name := data.Name
 	return m.run("renaming", func(ctx context.Context) tea.Msg {
+		now, err := api.Environment(ctx, uid)
+		if err != nil {
+			return errorMsg{"Not renamed", fmt.Errorf("couldn't read the latest environment; nothing was saved: %w", err)}
+		}
+		data = now.Clone()
+		data.Name = name
 		if err := api.PutEnvironment(ctx, uid, data); err != nil {
 			return errorMsg{"Not renamed", err}
 		}
@@ -863,19 +878,25 @@ func (m *Model) editSettings(n *tree.Node) tea.Cmd {
 	}
 	colID := c.Summary.ID
 	if n.Kind == tree.Collection {
+		base := c.Data.Clone()
+		var submitted *postman.Collection
 		return editmodal.Open(editmodal.Request{
 			Title: "Collection · " + c.Name(), Hint: m.saveHint(), Text: strings.TrimRight(reqdoc.RenderCollection(c.Data), "\n"),
 			Ext: reqdoc.Ext, Name: "collection", Tall: true, Complete: m.completerFor(colID),
 			Submit: func(text string) tea.Cmd {
-				nc, err := reqdoc.ApplyCollection(c.Data, text)
+				nc, err := reqdoc.ApplyCollection(base, text)
 				if err != nil {
 					return editmodal.Fail(err)
 				}
-				return m.saveCollectionSettings(c, nc, m.collectionUndo(c))
+				submitted = nc
+				return m.saveCollectionSettingsFrom(c, base, nc, m.collectionUndo(c))
 			},
+			Saved: func() { base = submitted },
 		})
 	}
 	it := n.Item
+	base := it.Clone()
+	var submitted *postman.Item
 	return editmodal.Open(editmodal.Request{
 		Title: "Folder · " + it.Name, Hint: m.saveHint(), Text: strings.TrimRight(reqdoc.RenderFolder(it), "\n"),
 		Ext: reqdoc.Ext, Name: "folder", Tall: true, Complete: m.completerFor(colID),
@@ -885,26 +906,23 @@ func (m *Model) editSettings(n *tree.Node) tea.Cmd {
 			if cur == nil {
 				return editmodal.Fail(fmt.Errorf("%s isn't in the collection any more", it.Name))
 			}
-			nf, err := reqdoc.ApplyFolder(cur, text)
+			nf, err := reqdoc.ApplyFolder(base, text)
 			if err != nil {
 				return editmodal.Fail(err)
 			}
 			u := &undoEntry{what: "change " + cur.Name, colID: colID, kind: undoSave, item: cur.Clone()}
+			submitted = nf
 			if c.Path != "" || m.st.API == nil {
 				return m.saveFile(c, func() { replaceItem(c, nf) }, func() tea.Msg {
 					return editmodal.ResultMsg{Then: changedMsg{colID: colID, undo: u, note: "saved " + nf.Name}}
 				})
 			}
-			api := m.api
-			uid := c.Summary.UID
-			to := m.saveTarget()
-			return m.run("saving "+nf.Name, func(ctx context.Context) tea.Msg {
-				if err := api.UpdateFolder(ctx, uid, nf); err != nil {
-					return editmodal.ResultMsg{Err: err}
-				}
-				col, err := api.Collection(ctx, uid)
-				return editmodal.ResultMsg{Then: changedMsg{colID: colID, col: col, err: err, undo: u, note: "saved " + nf.Name + " " + to}}
-			})
+			return m.saveFolderSettings(c, base, nf, u)
+		},
+		Saved: func() {
+			if submitted != nil {
+				base = submitted
+			}
 		},
 	})
 }
@@ -919,6 +937,10 @@ func (m *Model) collectionUndo(c *store.Col) *undoEntry {
 // saveCollectionSettings saves a collection's own settings; u, when set,
 // is recorded once that worked.
 func (m *Model) saveCollectionSettings(c *store.Col, nc *postman.Collection, u *undoEntry) tea.Cmd {
+	return m.saveCollectionSettingsFrom(c, c.Data.Clone(), nc, u)
+}
+
+func (m *Model) saveCollectionSettingsFrom(c *store.Col, base, nc *postman.Collection, u *undoEntry) tea.Cmd {
 	colID := c.Summary.ID
 	if c.Path != "" || m.st.API == nil {
 		return m.saveFile(c, func() {
@@ -929,31 +951,21 @@ func (m *Model) saveCollectionSettings(c *store.Col, nc *postman.Collection, u *
 	}
 	api := m.api
 	uid := c.Summary.UID
-	// Only what changed goes to Postman, so a teammate's change to the rest
-	// made meanwhile stays.
-	var patch postman.CollectionPatch
-	desc := descOf(nc.Info.Description)
-	if desc != descOf(c.Data.Info.Description) {
-		patch.Description = &desc
-	}
-	if !sameJSON(nc.Auth, c.Data.Auth) {
-		patch.Auth = &nc.Auth
-	}
-	if !sameJSON(nc.Event, c.Data.Event) {
-		patch.Event = &nc.Event
-	}
-	base := append([]postman.Variable(nil), c.Data.Variable...)
-	vs := nc.Variable
-	if !sameJSON(vs, base) {
-		patch.Variable = &vs
-	}
+	base, nc = base.Clone(), nc.Clone()
 	to := m.saveTarget()
 	return m.run("saving "+c.Name(), func(ctx context.Context) tea.Msg {
-		// The variables: what changed here, on top of what Postman has now.
-		if patch.Variable != nil {
-			if now, err := api.Collection(ctx, uid); err == nil {
-				vs = mergeByKey(base, vs, now.Variable, varKey, sameVariable)
-			}
+		now, err := api.Collection(ctx, uid)
+		if err != nil {
+			return editmodal.ResultMsg{Err: fmt.Errorf("couldn't read the latest collection; nothing was saved: %w", err)}
+		}
+		p, err := settingsPatch(collectionSettings(base), collectionSettings(nc), collectionSettings(now))
+		if err != nil {
+			return editmodal.ResultMsg{Err: err}
+		}
+		patch := postman.CollectionPatch{Description: p.Description, Auth: p.Auth, Event: p.Event}
+		if !sameJSON(base.Variable, nc.Variable) {
+			vs := mergeByKey(base.Variable, nc.Variable, now.Variable, varKey, sameVariable)
+			patch.Variable = &vs
 		}
 		if patch != (postman.CollectionPatch{}) {
 			if err := api.PatchCollection(ctx, uid, patch); err != nil {

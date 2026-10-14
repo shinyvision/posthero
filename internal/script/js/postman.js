@@ -875,7 +875,7 @@
       set: function (template, data, options) { ph.visualize(str(template), JSON.stringify(data === undefined ? {} : data), JSON.stringify(options || {})); },
       clear: function () { ph.visualize('', '{}', '{}'); },
     },
-    require: function (name) { throw new Error('pm.require("' + name + '"): packages from the Postman package library aren\'t available in posthero'); },
+    require: function (name) { return ph.requirePackage(String(name)); },
   };
   // pm.expect is chai's expect itself, so expect.fail and the like are
   // there; chai loads the first time a script uses it.
