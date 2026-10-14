@@ -42,7 +42,7 @@ type savedEnv struct {
 func Open(dir string) (*Server, error) {
 	s := New()
 	s.workspaces = nil
-	s.dir, s.realClock = dir, true
+	s.dir, s.realClock, s.itemsMoveTime = dir, true, true
 	if data, err := os.ReadFile(filepath.Join(dir, "state.json")); err == nil {
 		var st savedState
 		if err := json.Unmarshal(data, &st); err != nil {

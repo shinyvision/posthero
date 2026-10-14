@@ -165,7 +165,7 @@ Everything goes to Postman right away, so your teammates see it in the Postman a
 
 ## Keeping up with your team
 
-posthero asks Postman what changed every 2 minutes (`:set refresh=120`), while you're using it. It pauses while the terminal is in the background or after 10 minutes without a key, and catches up when you come back. `R` asks right away. A request that changed while you had it open updates in the editor, unless you changed it too, in which case your version stays and posthero says so.
+posthero asks Postman what changed every 2 minutes (`:set refresh=120`), while you're using it. It pauses while the terminal is in the background or after 10 minutes without a key, and catches up when you come back. Postman doesn't say when something in a collection changed (only when the collection itself did), so these checks fetch the collection of the open request again; `R` fetches every collection, right away, and says when it is done. A request that changed while you had it open updates in the editor, unless you changed it too, in which case your version stays and posthero says so.
 
 These checks cost Postman API calls, which Postman counts per team per month. One check costs two calls, and only collections that changed are fetched again. The workspace is cached on disk, so posthero starts at once and works offline with what it last saw.
 

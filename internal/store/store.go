@@ -282,9 +282,14 @@ type Plan struct {
 	API       *postman.Client
 	CacheDir  string
 	Cols      map[string]string // id → updatedAt of what is here
+	UIDs      map[string]string // id → uid of what is here
 	Envs      map[string]string
 	// Loaded says which collections were fetched whole.
 	Loaded map[string]bool
+	// Recheck are collections (ids) to fetch whatever their updatedAt says,
+	// the first first: Postman moves a collection's updatedAt when the
+	// collection itself changes, not when what is in it does.
+	Recheck []string
 	// Globals says to fetch the globals too.
 	Globals bool
 	// Progress, when set, hears of each collection as it comes in, and
@@ -319,9 +324,10 @@ func (s *Store) ApplyProgress(p Progress) bool {
 
 // Plan returns what a refresh needs to know (on the UI's goroutine).
 func (s *Store) Plan(globals bool) Plan {
-	p := Plan{Workspace: s.Workspace.ID, API: s.API, CacheDir: s.cacheDir, Cols: map[string]string{}, Envs: map[string]string{}, Loaded: map[string]bool{}, Globals: globals || !s.globalsKnown}
+	p := Plan{Workspace: s.Workspace.ID, API: s.API, CacheDir: s.cacheDir, Cols: map[string]string{}, UIDs: map[string]string{}, Envs: map[string]string{}, Loaded: map[string]bool{}, Globals: globals || !s.globalsKnown}
 	for id, c := range s.cols {
 		p.Cols[id] = c.Summary.UpdatedAt
+		p.UIDs[id] = c.Summary.UID
 		p.Loaded[id] = c.Data != nil
 	}
 	for id, e := range s.envs {
@@ -352,12 +358,70 @@ func Fetch(ctx context.Context, p Plan) (Fetched, error) {
 	if p.API == nil {
 		return f, nil
 	}
-	cols, err := p.API.Collections(ctx, p.Workspace)
-	if err != nil {
-		return f, err
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	// Postman takes a few seconds to list what there is: both lists at
+	// once, and meanwhile the collections to recheck.
+	var cols, envs []postman.Summary
+	var colsErr, envsErr error
+	var lists sync.WaitGroup
+	lists.Add(2)
+	go func() {
+		defer lists.Done()
+		if cols, colsErr = p.API.Collections(ctx, p.Workspace); colsErr != nil {
+			cancel()
+		}
+	}()
+	go func() {
+		defer lists.Done()
+		if envs, envsErr = p.API.Environments(ctx, p.Workspace); envsErr != nil {
+			cancel()
+		}
+	}()
+
+	type got struct {
+		col *postman.Collection
+		err error
 	}
-	envs, err := p.API.Environments(ctx, p.Workspace)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	results := map[string]got{} // by collection id
+	asked := map[string]bool{}
+	sem := make(chan struct{}, 6) // well within the API's 300 a minute
+	// get fetches a collection, in its turn: the ones asked for first go
+	// first.
+	get := func(id, uid string, sum *postman.Summary) {
+		if asked[id] {
+			return
+		}
+		asked[id] = true
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			c, err := p.API.Collection(ctx, uid)
+			mu.Lock()
+			results[id] = got{c, err}
+			mu.Unlock()
+			if err == nil && sum != nil && p.Progress != nil {
+				p.Progress(Progress{Loaded: &Col{Summary: *sum, Data: c.Clone()}})
+			}
+		}()
+	}
+	for _, id := range p.Recheck {
+		if uid := p.UIDs[id]; uid != "" && p.Loaded[id] {
+			get(id, uid, nil)
+		}
+	}
+	lists.Wait()
+	// One failing cancels the other: its error is the one to tell.
+	err := colsErr
+	if envsErr != nil && (err == nil || errors.Is(err, context.Canceled)) {
+		err = envsErr
+	}
 	if err != nil {
+		wg.Wait()
 		return f, err
 	}
 	if p.Progress != nil {
@@ -370,33 +434,12 @@ func Fetch(ctx context.Context, p Plan) (Fetched, error) {
 		p.Progress(Progress{Listed: listed})
 	}
 	present := map[string]bool{}
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 6) // well within the API's 300 a minute
 	for _, sum := range cols {
 		present[sum.ID] = true
 		if at, ok := p.Cols[sum.ID]; ok && at == sum.UpdatedAt && p.Loaded[sum.ID] {
 			continue
 		}
-		wg.Add(1)
-		go func(sum postman.Summary) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			c, err := p.API.Collection(ctx, sum.UID)
-			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
-				f.Errors = append(f.Errors, fmt.Errorf("%s: %w", sum.Name, err))
-				return
-			}
-			col := &Col{Summary: sum, Data: c}
-			f.Cols = append(f.Cols, col)
-			writeCache(p.CacheDir, "collections", sum.UID, cachedCol{Summary: sum, Data: c})
-			if p.Progress != nil {
-				p.Progress(Progress{Loaded: &Col{Summary: sum, Data: c.Clone()}})
-			}
-		}(sum)
+		get(sum.ID, sum.UID, &sum)
 	}
 	for id := range p.Cols {
 		if !present[id] {
@@ -437,6 +480,23 @@ func Fetch(ctx context.Context, p Plan) (Fetched, error) {
 		if err == nil {
 			f.Globals, f.HasGlobals = g, true
 			writeCacheFile(p.CacheDir, "globals.json", g)
+		}
+	}
+	wg.Wait()
+	// What came in, of what is still there, as Postman listed it.
+	for _, sum := range cols {
+		r, ok := results[sum.ID]
+		switch {
+		case !ok:
+		case r.err != nil:
+			f.Errors = append(f.Errors, fmt.Errorf("%s: %w", sum.Name, r.err))
+		default:
+			f.Cols = append(f.Cols, &Col{Summary: sum, Data: r.col})
+			wg.Add(1)
+			go func(sum postman.Summary, c *postman.Collection) {
+				defer wg.Done()
+				writeCache(p.CacheDir, "collections", sum.UID, cachedCol{Summary: sum, Data: c})
+			}(sum, r.col)
 		}
 	}
 	wg.Wait()

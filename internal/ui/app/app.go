@@ -185,9 +185,12 @@ type Model struct {
 	savedState string
 	refreshing bool
 	refreshSeq int
-	exitNote   string
-	ctx        context.Context
-	stop       context.CancelFunc
+	// refreshAsked says the refresh running was asked for (and says how it
+	// went when done); refreshAgain asks for one when the one running ends.
+	refreshAsked, refreshAgain bool
+	exitNote                   string
+	ctx                        context.Context
+	stop                       context.CancelFunc
 }
 
 // New builds the app.

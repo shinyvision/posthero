@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -262,6 +263,11 @@ type CollectionPatch struct {
 // the collection itself by its bare id, though (a uid there reads as
 // moving the item to another collection), except to make an item in a
 // teammate's collection: see create.
+//
+// An item's owner is whoever made it, which isn't always the collection's
+// owner: what the API key makes in a teammate's collection is the key's
+// user's. So an item goes by the uid Postman gives it (see Ref), and when
+// that isn't known the client tries the uids it may have (see itemRefs).
 
 // SplitUID splits a uid into the owner's id and the id; a bare id has no
 // owner.
@@ -278,14 +284,38 @@ func SplitUID(s string) (owner, id string) {
 	return s[:i], s[i+1:]
 }
 
-// itemRef is how the API names an item of a collection (by its uid): by
-// the item's uid, which has the collection owner's id.
+// Ref is how to name an item (a request, folder or example) to the API:
+// by its uid when it has one of its own, else by its id.
+func Ref(id, uid string) string {
+	if owner, bare := SplitUID(uid); owner != "" && bare == id {
+		return uid
+	}
+	return id
+}
+
+// itemRef is how the API names an item of a collection (by its uid): a uid
+// as it is, and a bare id as the collection owner's.
 func itemRef(collection, id string) string {
 	owner, _ := SplitUID(collection)
 	if o, _ := SplitUID(id); o != "" || owner == "" || id == "" {
 		return id
 	}
 	return owner + "-" + id
+}
+
+// itemRefs are the names an item of a collection may go by, the likeliest
+// first: the uid it was given by, the collection owner's uid for it, and
+// its bare id, which the API looks up in the key's own account (where what
+// the key made in a teammate's collection is).
+func itemRefs(collection, ref string) []string {
+	_, id := SplitUID(ref)
+	var out []string
+	for _, r := range []string{itemRef(collection, ref), itemRef(collection, id), id} {
+		if r != "" && !slices.Contains(out, r) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // itemsPath is the path of a collection's items of a kind (requests,
@@ -295,9 +325,18 @@ func itemsPath(collection, kind string) string {
 	return "/collections/" + url.PathEscape(id) + "/" + kind
 }
 
-// itemPath is the path of one item of a collection.
-func itemPath(collection, kind, id string) string {
-	return itemsPath(collection, kind) + "/" + url.PathEscape(itemRef(collection, id))
+// onItem sends a request about one item of a collection, named by its uid
+// or id: by each name it may go by (itemRefs) until Postman finds it.
+// Postman changed nothing when it couldn't, so asking again is safe.
+func (c *Client) onItem(ctx context.Context, method, collection, kind, ref string, body, out any) error {
+	var err error
+	for _, r := range itemRefs(collection, ref) {
+		err = c.do(ctx, method, itemsPath(collection, kind)+"/"+url.PathEscape(r), body, out)
+		if !itemNotFound(err) {
+			return err
+		}
+	}
+	return err
 }
 
 // PatchCollection changes the collection's own settings; collection is
@@ -386,23 +425,62 @@ func emptyJSON(v any) bool {
 // itemAnswer is what the item endpoints answer.
 type itemAnswer struct {
 	Data struct {
-		ID        string `json:"id"`
-		UpdatedAt string `json:"updatedAt"`
-		Folder    string `json:"folder"`
+		ID string `json:"id"`
+		// Owner is a user id: a string, though the API sends some as numbers.
+		Owner     json.RawMessage `json:"owner"`
+		UpdatedAt string          `json:"updatedAt"`
 	} `json:"data"`
 }
 
-// create makes an item of a kind (requests, folders, responses) in a
-// collection (by its uid); query, when set, starts with "?". The bare id
-// finds only the API key's own collections: in a teammate's, the API
-// can't find the collection, and the uid finds it. Nothing was made
-// then, so asking again makes it once.
-func (c *Client) create(ctx context.Context, collection, kind, query string, body, out any) error {
-	err := c.do(ctx, http.MethodPost, itemsPath(collection, kind)+query, body, out)
-	if owner, _ := SplitUID(collection); owner != "" && collectionNotFound(err) {
-		err = c.do(ctx, http.MethodPost, "/collections/"+url.PathEscape(collection)+"/"+kind+query, body, out)
+// Made is an item Postman made: its id, and its uid when Postman said whose
+// it is (the API key's user's: not always the collection owner's).
+type Made struct {
+	ID, UID string
+}
+
+// Ref names the item to the API (see Ref).
+func (m Made) Ref() string { return Ref(m.ID, m.UID) }
+
+// made is what an answer to making an item says was made.
+func (a itemAnswer) made() Made {
+	m := Made{ID: a.Data.ID}
+	owner := strings.Trim(string(a.Data.Owner), `"`)
+	if o, id := SplitUID(owner + "-" + m.ID); o == owner && id == m.ID {
+		m.UID = owner + "-" + m.ID
 	}
-	return err
+	return m
+}
+
+// create makes an item of a kind (requests, folders, responses) in a
+// collection (by its uid), in parent (by its uid or id; empty for none),
+// which in puts in the query (starting with "?") or the body. The bare
+// collection id finds only the API key's own collections: in a
+// teammate's, the API can't find the collection, and the uid finds it. A
+// parent the API can't find is tried by its other names (itemRefs).
+// Nothing was made then, so asking again makes it once.
+func (c *Client) create(ctx context.Context, collection, kind, parent string, in func(parent string) (query string, body any)) (Made, error) {
+	parents := []string{""}
+	if parent != "" {
+		parents = itemRefs(collection, parent)
+	}
+	path := itemsPath(collection, kind)
+	var out itemAnswer
+	var err error
+	for _, p := range parents {
+		query, body := in(p)
+		err = c.do(ctx, http.MethodPost, path+query, body, &out)
+		if owner, _ := SplitUID(collection); owner != "" && collectionNotFound(err) {
+			path = "/collections/" + url.PathEscape(collection) + "/" + kind
+			err = c.do(ctx, http.MethodPost, path+query, body, &out)
+		}
+		if !itemNotFound(err) {
+			break
+		}
+	}
+	if err != nil {
+		return Made{}, err
+	}
+	return out.made(), nil
 }
 
 // collectionNotFound reports whether the API couldn't find the collection
@@ -412,29 +490,37 @@ func collectionNotFound(err error) bool {
 	return errors.As(err, &e) && e.Status == http.StatusNotFound && strings.Contains(e.Message, "collection")
 }
 
-// CreateRequest adds a request to a collection (by its uid), in a folder
-// when folder is not empty, and returns its id.
-func (c *Client) CreateRequest(ctx context.Context, collection, folder string, it *Item) (string, error) {
-	query := ""
-	if folder != "" {
-		query = "?folder=" + url.QueryEscape(itemRef(collection, folder))
-	}
-	var out itemAnswer
-	err := c.create(ctx, collection, "requests", query, requestBody(it), &out)
-	return out.Data.ID, err
+// itemNotFound reports whether the API couldn't find something in the
+// collection (and not the collection).
+func itemNotFound(err error) bool {
+	return IsNotFound(err) && !collectionNotFound(err)
 }
 
-// UpdateRequest saves a request of a collection (by its uid) and returns
-// when it was updated.
+// The item endpoints below take the collection's uid, and an item's uid
+// or, when its uid isn't known, its id.
+
+// CreateRequest adds a request to a collection, in a folder when folder is
+// not empty.
+func (c *Client) CreateRequest(ctx context.Context, collection, folder string, it *Item) (Made, error) {
+	return c.create(ctx, collection, "requests", folder, func(folder string) (string, any) {
+		if folder == "" {
+			return "", requestBody(it)
+		}
+		return "?folder=" + url.QueryEscape(folder), requestBody(it)
+	})
+}
+
+// UpdateRequest saves a request of a collection and returns when it was
+// updated.
 func (c *Client) UpdateRequest(ctx context.Context, collection string, it *Item) (string, error) {
 	var out itemAnswer
-	err := c.do(ctx, http.MethodPut, itemPath(collection, "requests", it.ID), requestBody(it), &out)
+	err := c.onItem(ctx, http.MethodPut, collection, "requests", Ref(it.ID, it.UID), requestBody(it), &out)
 	return out.Data.UpdatedAt, err
 }
 
-// DeleteRequest deletes a request of a collection (by its uid).
-func (c *Client) DeleteRequest(ctx context.Context, collection, id string) error {
-	return c.do(ctx, http.MethodDelete, itemPath(collection, "requests", id), nil, nil)
+// DeleteRequest deletes a request of a collection.
+func (c *Client) DeleteRequest(ctx context.Context, collection, ref string) error {
+	return c.onItem(ctx, http.MethodDelete, collection, "requests", ref, nil, nil)
 }
 
 // RequestRevision is a request as the API has it now: when it changed.
@@ -443,56 +529,54 @@ type RequestRevision struct {
 	LastUpdatedBy string `json:"lastUpdatedBy"`
 }
 
-// RequestInfo fetches when a request of a collection (by its uid) was
-// last changed and by whom.
-func (c *Client) RequestInfo(ctx context.Context, collection, id string) (RequestRevision, error) {
+// RequestInfo fetches when a request of a collection was last changed and
+// by whom.
+func (c *Client) RequestInfo(ctx context.Context, collection, ref string) (RequestRevision, error) {
 	var out struct {
 		Data RequestRevision `json:"data"`
 	}
-	err := c.do(ctx, http.MethodGet, itemPath(collection, "requests", id), nil, &out)
+	err := c.onItem(ctx, http.MethodGet, collection, "requests", ref, nil, &out)
 	return out.Data, err
 }
 
-// CreateFolder adds a folder to a collection (by its uid), inside parent
-// when it is not empty, and returns its id.
-func (c *Client) CreateFolder(ctx context.Context, collection, parent string, it *Item) (string, error) {
-	body := folderBody(it)
-	if parent != "" {
-		body["folder"] = itemRef(collection, parent)
-	}
-	var out itemAnswer
-	err := c.create(ctx, collection, "folders", "", body, &out)
-	return out.Data.ID, err
+// CreateFolder adds a folder to a collection, inside parent when it is not
+// empty.
+func (c *Client) CreateFolder(ctx context.Context, collection, parent string, it *Item) (Made, error) {
+	return c.create(ctx, collection, "folders", parent, func(parent string) (string, any) {
+		body := folderBody(it)
+		if parent != "" {
+			body["folder"] = parent
+		}
+		return "", body
+	})
 }
 
 // UpdateFolder saves a folder's own settings: name, description, auth and
-// scripts. collection is the collection's uid.
+// scripts.
 func (c *Client) UpdateFolder(ctx context.Context, collection string, it *Item) error {
-	return c.do(ctx, http.MethodPut, itemPath(collection, "folders", it.ID), folderBody(it), nil)
+	return c.onItem(ctx, http.MethodPut, collection, "folders", Ref(it.ID, it.UID), folderBody(it), nil)
 }
 
-// DeleteFolder deletes a folder of a collection (by its uid) and
-// everything in it.
-func (c *Client) DeleteFolder(ctx context.Context, collection, id string) error {
-	return c.do(ctx, http.MethodDelete, itemPath(collection, "folders", id), nil, nil)
+// DeleteFolder deletes a folder of a collection and everything in it.
+func (c *Client) DeleteFolder(ctx context.Context, collection, ref string) error {
+	return c.onItem(ctx, http.MethodDelete, collection, "folders", ref, nil, nil)
 }
 
-// CreateResponse saves an example for a request of a collection (by its
-// uid) and returns its id.
-func (c *Client) CreateResponse(ctx context.Context, collection, request string, r *Response) (string, error) {
-	var out itemAnswer
-	err := c.create(ctx, collection, "responses", "?request="+url.QueryEscape(itemRef(collection, request)), responseBody(r), &out)
-	return out.Data.ID, err
+// CreateResponse saves an example for a request of a collection.
+func (c *Client) CreateResponse(ctx context.Context, collection, request string, r *Response) (Made, error) {
+	return c.create(ctx, collection, "responses", request, func(request string) (string, any) {
+		return "?request=" + url.QueryEscape(request), responseBody(r)
+	})
 }
 
-// UpdateResponse saves an example of a collection (by its uid).
+// UpdateResponse saves an example of a collection.
 func (c *Client) UpdateResponse(ctx context.Context, collection string, r *Response) error {
-	return c.do(ctx, http.MethodPut, itemPath(collection, "responses", r.ID), responseBody(r), nil)
+	return c.onItem(ctx, http.MethodPut, collection, "responses", Ref(r.ID, r.UID), responseBody(r), nil)
 }
 
-// DeleteResponse deletes an example of a collection (by its uid).
-func (c *Client) DeleteResponse(ctx context.Context, collection, id string) error {
-	return c.do(ctx, http.MethodDelete, itemPath(collection, "responses", id), nil, nil)
+// DeleteResponse deletes an example of a collection.
+func (c *Client) DeleteResponse(ctx context.Context, collection, ref string) error {
+	return c.onItem(ctx, http.MethodDelete, collection, "responses", ref, nil, nil)
 }
 
 // Place says where a moved or copied item goes: into a folder (or the

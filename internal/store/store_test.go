@@ -62,11 +62,28 @@ func TestRefreshAndScopes(t *testing.T) {
 	if ch := s.Apply(f); ch.Any() || srv.Calls["GET /collections/"+pmtest.Owner+"-"+colID] != before {
 		t.Errorf("refetched without a change: %+v", ch)
 	}
-	// A teammate's change is.
+	// A teammate's change in the collection: Postman's list doesn't show
+	// it (the collection's updatedAt stays), so it takes a recheck, which
+	// goes first, while Postman lists what there is.
 	srv.Edit(colID, func(c *postman.Collection) *postman.Item { c.Item[0].Name = "List items"; return c.Item[0] })
 	f, _ = Fetch(context.Background(), s.Plan(false))
-	if ch := s.Apply(f); len(ch.Cols) != 1 || s.Col(colID).Data.Item[0].Name != "List items" {
-		t.Errorf("teammate's change: %+v", ch)
+	if ch := s.Apply(f); ch.Any() {
+		t.Errorf("the list showed a change in the collection: %+v", ch)
+	}
+	p := s.Plan(false)
+	p.Recheck = []string{colID}
+	f, err = Fetch(context.Background(), p)
+	if ch := s.Apply(f); err != nil || len(f.Errors) > 0 || len(ch.Cols) != 1 || s.Col(colID).Data.Item[0].Name != "List items" {
+		t.Errorf("teammate's change: %+v %v %v", ch, err, f.Errors)
+	}
+	// A change to the collection itself the list shows.
+	srv.Edit(colID, func(c *postman.Collection) *postman.Item {
+		c.Variable = append(c.Variable, postman.Variable{Key: "page", Value: "2"})
+		return nil
+	})
+	f, _ = Fetch(context.Background(), s.Plan(false))
+	if ch := s.Apply(f); len(ch.Cols) != 1 || len(s.Col(colID).Data.Variable) != 2 {
+		t.Errorf("teammate's change to the collection: %+v", ch)
 	}
 	// The cache brings it all back.
 	again := Open(api, postman.Workspace{ID: "ws1"}, cache, "")
@@ -103,9 +120,12 @@ func TestRefreshAndScopes(t *testing.T) {
 	if err := api.DeleteCollection(context.Background(), pmtest.Owner+"-"+colID); err != nil {
 		t.Fatal(err)
 	}
-	f, _ = Fetch(context.Background(), s.Plan(false))
-	if ch := s.Apply(f); len(ch.Gone) != 1 || s.Col(colID) != nil {
-		t.Errorf("gone: %+v", ch)
+	// (A recheck of it isn't a failure.)
+	p = s.Plan(false)
+	p.Recheck = []string{colID}
+	f, err = Fetch(context.Background(), p)
+	if ch := s.Apply(f); err != nil || len(f.Errors) > 0 || len(ch.Gone) != 1 || s.Col(colID) != nil {
+		t.Errorf("gone: %+v %v %v", ch, err, f.Errors)
 	}
 }
 

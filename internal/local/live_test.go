@@ -103,14 +103,14 @@ func TestLiveRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := here.Transfer(ctx, false, []string{owner + "-" + r3}, postman.Place{Collection: luid, Folder: owner + "-" + f.ID, Position: "after", Next: owner + "-" + r1.ID}, false); err != nil {
+	if _, err := here.Transfer(ctx, false, []string{r3.UID}, postman.Place{Collection: luid, Folder: owner + "-" + f.ID, Position: "after", Next: owner + "-" + r1.ID}, false); err != nil {
 		t.Fatal(err)
 	}
 	g, err := here.CreateFolder(ctx, luid, "", &postman.Item{Name: "G", Folder: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := here.CreateRequest(ctx, luid, g, req("R4", "DELETE")); err != nil {
+	if _, err := here.CreateRequest(ctx, luid, g.Ref(), req("R4", "DELETE")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := here.Transfer(ctx, false, []string{owner + "-" + find(lc, "R2").ID}, postman.Place{Collection: luid, Position: "end"}, false); err != nil {

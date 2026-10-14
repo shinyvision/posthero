@@ -40,9 +40,10 @@ func (c *Copy) Push(ctx context.Context, api *postman.Client, p *Plan, overwrite
 	}
 	sort.SliceStable(ops, func(a, b int) bool { return ops[a].order < ops[b].order })
 	res := Pushed{IDs: map[string]string{}}
+	uids := map[string]string{}
 	var errs []error
 	for _, o := range ops {
-		if err := c.exec(ctx, api, o, p.r, res.IDs); err != nil {
+		if err := c.exec(ctx, api, o, p.r, res.IDs, uids); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", o.what(), err))
 			continue
 		}
@@ -72,20 +73,48 @@ func (o op) what() string {
 }
 
 // exec makes one change in Postman. ids maps what was made here to its id
-// in Postman, for what comes after it (an item in a new folder).
-func (c *Copy) exec(ctx context.Context, api *postman.Client, o op, r *remote, ids map[string]string) error {
+// in Postman, for what comes after it (an item in a new folder), and uids
+// maps the ids of what the push made in Postman to their uids.
+func (c *Copy) exec(ctx context.Context, api *postman.Client, o op, r *remote, ids, uids map[string]string) error {
 	id := func(x string) string {
 		if to, ok := ids[x]; ok {
 			return to
 		}
 		return x
 	}
+	// ref names an item (or example) to Postman: by the uid Postman gave
+	// it, which isn't always the collection owner's (the local copy's uids
+	// are its own); by its id when it isn't known.
+	var theirs *postman.Collection
+	if r != nil {
+		theirs = r.cols[o.col].Data
+	}
+	ref := func(x string) string {
+		if x = id(x); x == "" {
+			return ""
+		}
+		if u := uids[x]; u != "" {
+			return u
+		}
+		if theirs != nil {
+			if it, _ := theirs.Find(x); it != nil {
+				return postman.Ref(it.ID, it.UID)
+			}
+			if _, ex, _ := theirs.FindExample(x); ex != nil {
+				return postman.Ref(ex.ID, ex.UID)
+			}
+		}
+		return x
+	}
+	// uidOf is an item's uid, for transfers, which take nothing else: when
+	// Postman's isn't known, the collection owner's.
 	owner, _ := postman.SplitUID(o.uid)
 	uidOf := func(x string) string {
-		if owner == "" || x == "" {
-			return x
+		u := ref(x)
+		if whose, _ := postman.SplitUID(u); whose != "" || owner == "" || u == "" {
+			return u
 		}
-		return owner + "-" + x
+		return owner + "-" + u
 	}
 	switch o.kind {
 	case "createCol":
@@ -153,30 +182,31 @@ func (c *Copy) exec(ctx context.Context, api *postman.Client, o op, r *remote, i
 				parent = o.parent
 			}
 		}
-		var made string
+		var made postman.Made
 		var err error
 		if o.item.Folder {
-			made, err = api.CreateFolder(ctx, o.uid, parent, o.item)
+			made, err = api.CreateFolder(ctx, o.uid, ref(parent), o.item)
 		} else {
-			made, err = api.CreateRequest(ctx, o.uid, parent, o.item)
+			made, err = api.CreateRequest(ctx, o.uid, ref(parent), o.item)
 		}
 		if err != nil {
 			return err
 		}
-		ids[o.item.ID] = made
+		ids[o.item.ID], uids[made.ID] = made.ID, made.UID
 		for _, resp := range o.item.Response {
-			rid, err := api.CreateResponse(ctx, o.uid, made, resp)
+			rid, err := api.CreateResponse(ctx, o.uid, made.Ref(), resp)
 			if err != nil {
 				return err
 			}
-			ids[resp.ID] = rid
+			ids[resp.ID], uids[rid.ID] = rid.ID, rid.UID
 		}
 		if o.last {
 			return nil // made at the end, where it is here
 		}
-		return c.placeItem(ctx, api, o, made, parent, id, uidOf)
+		return c.placeItem(ctx, api, o, made.ID, parent, id, uidOf)
 	case "update":
 		it := o.item.Clone()
+		it.UID = ref(it.ID)
 		if it.Folder {
 			return api.UpdateFolder(ctx, o.uid, it)
 		}
@@ -188,7 +218,7 @@ func (c *Copy) exec(ctx context.Context, api *postman.Client, o op, r *remote, i
 				return err
 			}
 		}
-		return syncExamples(ctx, api, o.uid, it, o.theirs, ids)
+		return syncExamples(ctx, api, o.uid, it, o.theirs, ids, uids)
 	case "move":
 		parent := ""
 		if o.parent != "" {
@@ -197,9 +227,9 @@ func (c *Copy) exec(ctx context.Context, api *postman.Client, o op, r *remote, i
 		return c.placeItem(ctx, api, o, o.item.ID, parent, id, uidOf)
 	case "delete":
 		if o.item.Folder {
-			return ignoreGone(api.DeleteFolder(ctx, o.uid, o.item.ID))
+			return ignoreGone(api.DeleteFolder(ctx, o.uid, ref(o.item.ID)))
 		}
-		return ignoreGone(api.DeleteRequest(ctx, o.uid, o.item.ID))
+		return ignoreGone(api.DeleteRequest(ctx, o.uid, ref(o.item.ID)))
 	case "createEnv":
 		e := o.env.Clone()
 		old := e.ID
@@ -244,7 +274,9 @@ func (c *Copy) placeItem(ctx context.Context, api *postman.Client, o op, itemID,
 }
 
 // syncExamples makes a request's examples in Postman what they are here.
-func syncExamples(ctx context.Context, api *postman.Client, uid string, mine, theirs *postman.Item, ids map[string]string) error {
+// mine is the request as it is here, with the uid Postman gave it; theirs
+// is Postman's, whose examples have theirs.
+func syncExamples(ctx context.Context, api *postman.Client, uid string, mine, theirs *postman.Item, ids, uids map[string]string) error {
 	there := map[string]*postman.Response{}
 	if theirs != nil {
 		for _, r := range theirs.Response {
@@ -257,20 +289,22 @@ func syncExamples(ctx context.Context, api *postman.Client, uid string, mine, th
 		t, ok := there[r.ID]
 		switch {
 		case !ok:
-			rid, err := api.CreateResponse(ctx, uid, mine.ID, r)
+			rid, err := api.CreateResponse(ctx, uid, postman.Ref(mine.ID, mine.UID), r)
 			if err != nil {
 				return err
 			}
-			ids[r.ID] = rid
+			ids[r.ID], uids[rid.ID] = rid.ID, rid.UID
 		case fingerprint(t) != fingerprint(r):
+			r = r.Clone()
+			r.UID = t.UID
 			if err := api.UpdateResponse(ctx, uid, r); err != nil {
 				return err
 			}
 		}
 	}
-	for rid := range there {
+	for rid, t := range there {
 		if !here[rid] {
-			if err := ignoreGone(api.DeleteResponse(ctx, uid, rid)); err != nil {
+			if err := ignoreGone(api.DeleteResponse(ctx, uid, postman.Ref(t.ID, t.UID))); err != nil {
 				return err
 			}
 		}

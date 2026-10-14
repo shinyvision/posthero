@@ -88,7 +88,9 @@ func placeOf(c *postman.Collection, id string) (parent, next string) {
 	return parent, next
 }
 
-// ownerOf is the owner part of a collection's uid, which item uids share.
+// ownerOf is the owner part of a collection's uid, which the uids of most
+// of its items share: not those made through the API by someone else (see
+// postman.Ref).
 func ownerOf(c *store.Col) string {
 	owner, _, _ := strings.Cut(c.Summary.UID, "-")
 	if owner == "" || len(c.Summary.UID) < 37 {
@@ -104,7 +106,7 @@ func itemUID(c *store.Col, it *postman.Item) string {
 	return ownerOf(c) + "-" + it.ID
 }
 
-// exampleUID is an example's uid, which has its collection owner's id too.
+// exampleUID is an example's uid, like itemUID's.
 func exampleUID(c *store.Col, r *postman.Response) string {
 	if r.UID != "" {
 		return r.UID
@@ -215,10 +217,6 @@ func (m *Model) newFolder(n *tree.Node) tea.Cmd {
 // another item when after is set.
 func (m *Model) create(c *store.Col, parent, after *postman.Item, it *postman.Item) tea.Cmd {
 	colID := c.Summary.ID
-	parentID := ""
-	if parent != nil {
-		parentID = parent.ID
-	}
 	if c.Path != "" || m.st.API == nil {
 		it.ID = store.NewID()
 		return m.saveFile(c, func() {
@@ -238,7 +236,6 @@ func (m *Model) create(c *store.Col, parent, after *postman.Item, it *postman.It
 	}
 	api := m.api
 	uid := c.Summary.UID
-	owner := ownerOf(c)
 	afterUID := ""
 	if after != nil {
 		afterUID = itemUID(c, after)
@@ -248,22 +245,23 @@ func (m *Model) create(c *store.Col, parent, after *postman.Item, it *postman.It
 		parentUID = itemUID(c, parent)
 	}
 	return m.run("making "+it.Name, func(ctx context.Context) tea.Msg {
-		var id string
+		var got postman.Made
 		var err error
 		if it.Folder {
-			id, err = api.CreateFolder(ctx, uid, parentID, it)
+			got, err = api.CreateFolder(ctx, uid, parentUID, it)
 		} else {
-			id, err = api.CreateRequest(ctx, uid, parentID, it)
+			got, err = api.CreateRequest(ctx, uid, parentUID, it)
 			if err == nil && afterUID != "" {
-				_, err = api.Transfer(ctx, false, []string{owner + "-" + id}, postman.Place{Collection: uid, Folder: parentUID, Position: "after", Next: afterUID}, false)
+				_, err = api.Transfer(ctx, false, []string{madeUID(c, got)}, postman.Place{Collection: uid, Folder: parentUID, Position: "after", Next: afterUID}, false)
 			}
 		}
 		if err != nil {
 			return changedMsg{err: fmt.Errorf("couldn't make %s: %w", it.Name, err)}
 		}
+		id := got.ID
 		col, err := api.Collection(ctx, uid)
 		made := it.Clone()
-		made.ID = id
+		made.ID, made.UID = id, got.UID
 		u := undoEntry{what: "make " + it.Name, colID: colID, kind: undoCreate, item: made, folder: it.Folder}
 		return changedMsg{colID: colID, col: col, err: err, selectID: id, open: !it.Folder, undo: &u, note: "made " + it.Name}
 	})
@@ -398,7 +396,7 @@ func (m *Model) remove(c *store.Col, it *postman.Item) tea.Cmd {
 	}
 	api := m.api
 	uid := c.Summary.UID
-	id, folder := it.ID, it.Folder
+	id, folder := postman.Ref(it.ID, it.UID), it.Folder
 	return m.run("deleting "+it.Name, func(ctx context.Context) tea.Msg {
 		var err error
 		if folder {
@@ -1033,7 +1031,7 @@ func (m *Model) removeQuiet(c *store.Col, it *postman.Item, note string) tea.Cmd
 		return m.saveFile(c, func() { c.Data.Remove(it.ID) }, func() tea.Msg { return changedMsg{colID: colID, note: note} })
 	}
 	api := m.api
-	uid, id, folder := c.Summary.UID, it.ID, it.Folder
+	uid, id, folder := c.Summary.UID, postman.Ref(it.ID, it.UID), it.Folder
 	return m.run("taking it back", func(ctx context.Context) tea.Msg {
 		var err error
 		if folder {
@@ -1065,6 +1063,10 @@ func (m *Model) restore(c *store.Col, it *postman.Item, note string) tea.Cmd {
 	}
 	api := m.api
 	uid := c.Summary.UID
+	if cur, _ := c.Data.Find(it.ID); cur != nil {
+		it = it.Clone()
+		it.UID = cur.UID
+	}
 	return m.run("restoring "+it.Name, func(ctx context.Context) tea.Msg {
 		var err error
 		if it.Folder {
@@ -1103,7 +1105,6 @@ func (m *Model) recreate(c *store.Col, u undoEntry) tea.Cmd {
 	}
 	api := m.api
 	uid := c.Summary.UID
-	owner := ownerOf(c)
 	var nextUID string
 	nextFolder := false
 	if u.next != "" {
@@ -1111,50 +1112,60 @@ func (m *Model) recreate(c *store.Col, u undoEntry) tea.Cmd {
 			nextUID, nextFolder = itemUID(c, next), next.Folder
 		}
 	}
-	parentUID := ""
+	parentUID, parent := "", u.parent
 	if u.parent != "" {
 		if p, _ := c.Data.Find(u.parent); p != nil {
 			parentUID = itemUID(c, p)
+			parent = parentUID
 		}
 	}
 	return m.run("bringing back "+u.item.Name, func(ctx context.Context) tea.Msg {
-		id, err := recreateItem(ctx, api, uid, u.parent, u.item)
+		made, err := recreateItem(ctx, api, uid, parent, u.item)
 		if err != nil {
 			return changedMsg{err: fmt.Errorf("couldn't bring %s back: %w", u.item.Name, err)}
 		}
 		if nextUID != "" && u.item.Folder == nextFolder {
-			_, _ = api.Transfer(ctx, u.item.Folder, []string{owner + "-" + id}, postman.Place{Collection: uid, Folder: parentUID, Position: "before", Next: nextUID, NextFolder: nextFolder}, false)
+			_, _ = api.Transfer(ctx, u.item.Folder, []string{madeUID(c, made)}, postman.Place{Collection: uid, Folder: parentUID, Position: "before", Next: nextUID, NextFolder: nextFolder}, false)
 		}
 		col, err := api.Collection(ctx, uid)
-		return changedMsg{colID: colID, col: col, err: err, selectID: id, note: "brought back " + u.item.Name}
+		return changedMsg{colID: colID, col: col, err: err, selectID: made.ID, note: "brought back " + u.item.Name}
 	})
 }
 
+// madeUID is the uid of an item just made in a collection: the one Postman
+// said, else the collection owner's.
+func madeUID(c *store.Col, made postman.Made) string {
+	if made.UID != "" {
+		return made.UID
+	}
+	return ownerOf(c) + "-" + made.ID
+}
+
 // recreateItem makes an item again with everything in it, and its saved
-// examples, in the collection uid.
-func recreateItem(ctx context.Context, api *postman.Client, uid, parent string, it *postman.Item) (string, error) {
+// examples, in the collection uid, in parent (by its uid or id).
+func recreateItem(ctx context.Context, api *postman.Client, uid, parent string, it *postman.Item) (postman.Made, error) {
 	if it.Folder {
-		id, err := api.CreateFolder(ctx, uid, parent, it)
+		made, err := api.CreateFolder(ctx, uid, parent, it)
 		if err != nil {
-			return "", err
+			return made, err
 		}
 		for _, child := range it.Item {
-			if _, err := recreateItem(ctx, api, uid, id, child); err != nil {
-				return id, err
+			if _, err := recreateItem(ctx, api, uid, made.Ref(), child); err != nil {
+				return made, err
 			}
 		}
-		return id, nil
+		return made, nil
 	}
-	id, err := api.CreateRequest(ctx, uid, parent, it)
+	made, err := api.CreateRequest(ctx, uid, parent, it)
 	if err != nil {
-		return "", err
+		return made, err
 	}
 	for _, r := range it.Response {
-		if _, err := api.CreateResponse(ctx, uid, id, r); err != nil {
-			return id, err
+		if _, err := api.CreateResponse(ctx, uid, made.Ref(), r); err != nil {
+			return made, err
 		}
 	}
-	return id, nil
+	return made, nil
 }
 
 // itemIDs are the ids of an item and everything in it.

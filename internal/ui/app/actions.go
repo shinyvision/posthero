@@ -60,7 +60,13 @@ func (m *Model) do(action string, count int) tea.Cmd {
 			m.setStatus("collections opened from files are read from disk; nothing to refresh", false)
 			return nil
 		}
-		m.setStatus("asking Postman what changed…", false)
+		if m.refreshing {
+			// Once the one running is done.
+			m.refreshAgain = true
+			m.setStatus("asking Postman what changed…", false)
+			return nil
+		}
+		m.refreshAsked = true
 		return m.refresh(true)
 	case "workspace":
 		if len(m.workspaces) == 0 {

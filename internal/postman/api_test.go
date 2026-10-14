@@ -31,6 +31,7 @@ func TestClientAgainstFake(t *testing.T) {
 // collection takes its uid.
 func TestCreateInTeammatesCollection(t *testing.T) {
 	const uid = "2000-c0ffee00-0000-4000-8000-000000000001"
+	const made = "c0ffee00-0000-4000-8000-0000000000aa"
 	var calls []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls = append(calls, r.Method+" "+r.URL.Path)
@@ -39,28 +40,80 @@ func TestCreateInTeammatesCollection(t *testing.T) {
 			_, _ = io.WriteString(w, `{"error":{"name":"instanceNotFoundError","message":"We could not find the collection you are looking for"}}`)
 			return
 		}
-		_, _ = io.WriteString(w, `{"data":{"id":"made"}}`)
+		// What it made is the key's user's: the owner, sent as a string
+		// or a number.
+		owner := `"58666953"`
+		if strings.HasSuffix(r.URL.Path, "/folders") {
+			owner = `58666953`
+		}
+		_, _ = io.WriteString(w, `{"data":{"id":"`+made+`","owner":`+owner+`}}`)
 	}))
 	defer srv.Close()
 	c := postman.NewClient("key", srv.URL)
 	ctx := context.Background()
 
 	req, err := c.CreateRequest(ctx, uid, "f1", &postman.Item{Name: "New", Request: &postman.Request{Method: "GET", URL: postman.ParseURL("http://x")}})
-	if err != nil || req != "made" {
-		t.Fatalf("request: %q %v", req, err)
+	if err != nil || req != (postman.Made{ID: made, UID: "58666953-" + made}) {
+		t.Fatalf("request: %+v %v", req, err)
 	}
 	folder, err := c.CreateFolder(ctx, uid, "", &postman.Item{Name: "New", Folder: true})
-	if err != nil || folder != "made" {
-		t.Fatalf("folder: %q %v", folder, err)
+	if err != nil || folder != (postman.Made{ID: made, UID: "58666953-" + made}) {
+		t.Fatalf("folder: %+v %v", folder, err)
 	}
 	ex, err := c.CreateResponse(ctx, uid, "r1", &postman.Response{Name: "OK", Code: 200})
-	if err != nil || ex != "made" {
-		t.Fatalf("example: %q %v", ex, err)
+	if err != nil || ex != (postman.Made{ID: made, UID: "58666953-" + made}) {
+		t.Fatalf("example: %+v %v", ex, err)
 	}
 	want := []string{
 		"POST /collections/c0ffee00-0000-4000-8000-000000000001/requests", "POST /collections/" + uid + "/requests",
 		"POST /collections/c0ffee00-0000-4000-8000-000000000001/folders", "POST /collections/" + uid + "/folders",
 		"POST /collections/c0ffee00-0000-4000-8000-000000000001/responses", "POST /collections/" + uid + "/responses",
+	}
+	if strings.Join(calls, "\n") != strings.Join(want, "\n") {
+		t.Errorf("calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// TestItemsMadeByTheKeysUser: what the API key's user made in a
+// teammate's collection has the user's id in its uid, not the collection
+// owner's. It goes by its uid when that is known; else the client tries
+// the collection owner's uid, then the bare id (looked up in the key's own
+// account).
+func TestItemsMadeByTheKeysUser(t *testing.T) {
+	const (
+		col  = "24059534-e2a22818-9303-40e4-9046-5703a7c85d9c"
+		id   = "23fdffdb-bc25-22ac-904e-372a412f7fa3"
+		mine = "58666953-" + id
+	)
+	var calls []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		switch r.URL.Path {
+		case "/collections/e2a22818-9303-40e4-9046-5703a7c85d9c/responses/" + mine, "/collections/e2a22818-9303-40e4-9046-5703a7c85d9c/responses/" + id:
+			_, _ = io.WriteString(w, `{"data":{"id":"`+id+`","owner":"58666953"}}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"error":{"name":"instanceNotFoundError","message":"We could not find the response you are looking for"}}`)
+		}
+	}))
+	defer srv.Close()
+	c := postman.NewClient("key", srv.URL)
+	ctx := context.Background()
+
+	if err := c.UpdateResponse(ctx, col, &postman.Response{ID: id, UID: mine, Name: "Mine"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.UpdateResponse(ctx, col, &postman.Response{ID: id, Name: "Mine"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DeleteResponse(ctx, col, "c0ffee00-0000-4000-8000-000000000009"); !postman.IsNotFound(err) {
+		t.Fatalf("deleting what isn't there: %v", err)
+	}
+	p := "/collections/e2a22818-9303-40e4-9046-5703a7c85d9c/responses/"
+	want := []string{
+		"PUT " + p + mine,
+		"PUT " + p + "24059534-" + id, "PUT " + p + id,
+		"DELETE " + p + "24059534-c0ffee00-0000-4000-8000-000000000009", "DELETE " + p + "c0ffee00-0000-4000-8000-000000000009",
 	}
 	if strings.Join(calls, "\n") != strings.Join(want, "\n") {
 		t.Errorf("calls:\n%s", strings.Join(calls, "\n"))
@@ -116,10 +169,15 @@ func scenario(t *testing.T, c *postman.Client, ws string) {
 	it.Request.Body.SetLanguage("json")
 	it.Request.Description = &postman.Description{Content: "Makes a user"}
 	it.ProtocolProfileBehavior = json.RawMessage(`{"followRedirects":false}`)
-	id, err := c.CreateRequest(ctx, created.UID, folder.ID, it)
-	if err != nil || id == "" {
-		t.Fatalf("create request: %q %v", id, err)
+	made, err := c.CreateRequest(ctx, created.UID, folder.ID, it)
+	if err != nil || made.ID == "" {
+		t.Fatalf("create request: %+v %v", made, err)
 	}
+	// Postman says whose it is: what transfers name it by.
+	if o, _ := postman.SplitUID(made.UID); o == "" {
+		t.Fatalf("made without an owner: %+v", made)
+	}
+	id := made.ID
 	// What the check before a save asks: when it last changed.
 	if info, err := c.RequestInfo(ctx, created.UID, id); err != nil || info.UpdatedAt == "" {
 		t.Fatalf("request info: %+v %v", info, err)
@@ -201,7 +259,7 @@ func scenario(t *testing.T, c *postman.Client, ws string) {
 	}
 
 	// An example.
-	exID, err := c.CreateResponse(ctx, created.UID, id, &postman.Response{Name: "Created", Code: 201, Status: "Created", Header: postman.Params{{Key: "Content-Type", Value: "application/json"}}, Body: `{"id": 1}`, PreviewLanguage: "json"})
+	exMade, err := c.CreateResponse(ctx, created.UID, id, &postman.Response{Name: "Created", Code: 201, Status: "Created", Header: postman.Params{{Key: "Content-Type", Value: "application/json"}}, Body: `{"id": 1}`, PreviewLanguage: "json"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,20 +282,20 @@ func scenario(t *testing.T, c *postman.Client, ws string) {
 	} else if o := after.Response[0].OriginalRequest; o == nil || o.Method != "PUT" || o.URL.Raw != "{{base}}/users/2" {
 		t.Errorf("changed example's request: %+v", o)
 	}
-	if err := c.DeleteResponse(ctx, created.UID, exID); err != nil {
+	if err := c.DeleteResponse(ctx, created.UID, exMade.ID); err != nil {
 		t.Fatal(err)
 	}
 
 	// Folders, moving and copying.
-	sub, err := c.CreateFolder(ctx, created.UID, "", &postman.Item{Name: "Second", Folder: true, Description: &postman.Description{Content: "two"}})
+	subMade, err := c.CreateFolder(ctx, created.UID, "", &postman.Item{Name: "Second", Folder: true, Description: &postman.Description{Content: "two"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner := strings.SplitN(created.UID, "-", 2)[0]
-	if _, err := c.Transfer(ctx, false, []string{owner + "-" + id}, postman.Place{Collection: created.UID, Folder: owner + "-" + sub, Position: "end"}, false); err != nil {
+	sub := subMade.ID
+	if _, err := c.Transfer(ctx, false, []string{made.UID}, postman.Place{Collection: created.UID, Folder: subMade.UID, Position: "end"}, false); err != nil {
 		t.Fatal(err)
 	}
-	copies, err := c.Transfer(ctx, false, []string{owner + "-" + id}, postman.Place{Collection: created.UID, Position: "start"}, true)
+	copies, err := c.Transfer(ctx, false, []string{made.UID}, postman.Place{Collection: created.UID, Position: "start"}, true)
 	if err != nil || len(copies) != 1 {
 		t.Fatalf("copy: %v %v", copies, err)
 	}

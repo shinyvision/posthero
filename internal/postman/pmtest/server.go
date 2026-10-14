@@ -20,13 +20,16 @@ import (
 	"github.com/shinyvision/posthero/internal/postman"
 )
 
-// Owner is the user id the fake gives everything it makes: a teammate's.
-// The API key is another user's, Caller's, so as in the real API a bare id
-// (looked up in the caller's own account) finds nothing: everything has to
-// be named by its uid.
+// Owner is the user id the fake gives the collections and environments it
+// holds, and what is in them: a teammate's. The API key is another user's,
+// Caller's, so as in the real API a bare id (looked up in the caller's own
+// account) finds none of it: it has to be named by its uid.
 const Owner = "1000"
 
-// Caller is the user the API key belongs to.
+// Caller is the user the API key belongs to. As in the real API, what the
+// caller makes in a collection (requests, folders, examples) is the
+// caller's, though the collection is Owner's: its uid has Caller's id, and
+// its bare id finds it too.
 const Caller = "2000"
 
 // Key is the API key the fake accepts.
@@ -55,6 +58,11 @@ type Server struct {
 	// OnChange hears (on a goroutine of its own) that a request changed
 	// something.
 	OnChange func()
+	// itemsMoveTime makes a change to what is in a collection move the
+	// collection's updatedAt too. Postman's doesn't move (only a change to
+	// the collection itself does), so the fake's doesn't either; the local
+	// copy's does, which is how posthero (and save) see what changed.
+	itemsMoveTime bool
 }
 
 type collection struct {
@@ -198,8 +206,8 @@ func (s *Server) Globals(ws string) []postman.EnvValue {
 	return append([]postman.EnvValue(nil), s.globals[ws]...)
 }
 
-// Edit changes a stored collection as a teammate would, marking it and the
-// item it returns true for as updated.
+// Edit changes a stored collection as a teammate would, marking the item f
+// returns as updated, or (when it returns nil) the collection.
 func (s *Server) Edit(id string, f func(c *postman.Collection) *postman.Item) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -209,7 +217,9 @@ func (s *Server) Edit(id string, f func(c *postman.Collection) *postman.Item) {
 	}
 	it := f(c.col)
 	now := s.now()
-	c.col.Info.UpdatedAt = now
+	if it == nil || s.itemsMoveTime {
+		c.col.Info.UpdatedAt = now
+	}
 	if it != nil {
 		it.UpdatedAt = now
 	}
@@ -241,6 +251,50 @@ func own(uid string) (string, bool) {
 		return "", false
 	}
 	return id, true
+}
+
+// names reports whether ref names an item (or example) with this id and
+// uid as the API takes it: by its uid, or by its bare id when it is the
+// caller's.
+func names(ref, id, uid string) bool {
+	if ref == "" {
+		return false
+	}
+	owner, _ := postman.SplitUID(uid)
+	return ref == uid || ref == id && owner == Caller
+}
+
+// findItem finds a request or folder of a collection by what names it.
+func findItem(c *postman.Collection, ref string) *postman.Item {
+	var found *postman.Item
+	c.Walk(func(it *postman.Item, _ []*postman.Item) bool {
+		if found == nil && names(ref, it.ID, it.UID) {
+			found = it
+		}
+		return found == nil
+	})
+	return found
+}
+
+// findResponse finds an example of a collection, and its request, by what
+// names it.
+func findResponse(c *postman.Collection, ref string) (*postman.Item, *postman.Response) {
+	var req *postman.Item
+	var found *postman.Response
+	c.Walk(func(it *postman.Item, _ []*postman.Item) bool {
+		for _, r := range it.Response {
+			if found == nil && names(ref, r.ID, r.UID) {
+				req, found = it, r
+			}
+		}
+		return found == nil
+	})
+	return req, found
+}
+
+// madeByCaller marks an item made through the API as the caller's.
+func madeByCaller(it *postman.Item) {
+	it.UID = Caller + "-" + it.ID
 }
 
 // anyCollection finds a collection by id or uid, for tests (not the API).
@@ -423,20 +477,19 @@ func (s *Server) collectionsRoute(r *http.Request, parts []string, ws string, bo
 		return nil, &apiErr{http.StatusBadRequest, "changeParentError", "You can't update the parent. Use transfer instead."}
 	}
 	kind := parts[1]
-	var id string
+	ref := ""
 	if len(parts) >= 3 {
-		var ok bool
-		if id, ok = own(parts[2]); !ok {
+		if ref = parts[2]; ref == "" {
 			return nil, notFound(strings.TrimSuffix(kind, "s"))
 		}
 	}
 	switch kind {
 	case "requests":
-		return s.requestRoute(r, c, id, body)
+		return s.requestRoute(r, c, ref, body)
 	case "folders":
-		return s.folderRoute(r, c, id, body)
+		return s.folderRoute(r, c, ref, body)
 	case "responses":
-		return s.responseRoute(r, c, id, body)
+		return s.responseRoute(r, c, ref, body)
 	}
 	return nil, notFound("endpoint")
 }
@@ -498,39 +551,44 @@ func (s *Server) patchCollection(c *collection, body []byte) (any, *apiErr) {
 	return map[string]any{"collection": map[string]any{"id": col.Info.PostmanID, "name": col.Info.Name}}, nil
 }
 
+// touched marks a change to what is in a collection: to it, when it isn't
+// nil.
 func (s *Server) touched(c *collection, it *postman.Item) {
 	now := s.now()
-	c.col.Info.UpdatedAt = now
+	if s.itemsMoveTime {
+		c.col.Info.UpdatedAt = now
+	}
 	if it != nil {
 		it.UpdatedAt = now
 	}
 }
 
-func (s *Server) requestRoute(r *http.Request, c *collection, id string, body []byte) (any, *apiErr) {
+func (s *Server) requestRoute(r *http.Request, c *collection, ref string, body []byte) (any, *apiErr) {
 	switch {
-	case r.Method == http.MethodPost && id == "":
+	case r.Method == http.MethodPost && ref == "":
 		it := &postman.Item{}
 		if err := applyRequest(it, body); err != nil {
 			return nil, badRequest(err.Error())
 		}
 		var parent *postman.Item
 		if f := r.URL.Query().Get("folder"); f != "" {
-			f, _ = own(f)
-			parent, _ = c.col.Find(f)
+			parent = findItem(c.col, f)
 			if parent == nil || !parent.Folder {
 				return nil, notFound("folder")
 			}
 		}
 		s.stamp(it, s.now())
+		madeByCaller(it)
 		list := c.col.Container(parent)
 		c.col.Insert(parent, region(*list, len(*list), false), it)
 		s.touched(c, it)
 		return itemData(c, it), nil
 	}
-	it, _ := c.col.Find(id)
+	it := findItem(c.col, ref)
 	if it == nil || it.Folder {
 		return nil, notFound("request")
 	}
+	id := it.ID
 	switch r.Method {
 	case http.MethodGet:
 		return itemData(c, it), nil
@@ -543,13 +601,13 @@ func (s *Server) requestRoute(r *http.Request, c *collection, id string, body []
 	case http.MethodDelete:
 		c.col.Remove(id)
 		s.touched(c, nil)
-		return map[string]any{"model_id": id, "meta": map[string]any{"model": "request", "action": "destroy"}, "data": map[string]any{"id": id, "owner": Owner}}, nil
+		return map[string]any{"model_id": id, "meta": map[string]any{"model": "request", "action": "destroy"}, "data": map[string]any{"id": id, "owner": ownerOf(it.UID)}}, nil
 	}
 	return nil, notFound("endpoint")
 }
 
-func (s *Server) folderRoute(r *http.Request, c *collection, id string, body []byte) (any, *apiErr) {
-	if r.Method == http.MethodPost && id == "" {
+func (s *Server) folderRoute(r *http.Request, c *collection, ref string, body []byte) (any, *apiErr) {
+	if r.Method == http.MethodPost && ref == "" {
 		it := &postman.Item{Folder: true}
 		var in struct {
 			Folder string `json:"folder"`
@@ -560,13 +618,13 @@ func (s *Server) folderRoute(r *http.Request, c *collection, id string, body []b
 		}
 		var parent *postman.Item
 		if in.Folder != "" {
-			f, _ := own(in.Folder)
-			parent, _ = c.col.Find(f)
+			parent = findItem(c.col, in.Folder)
 			if parent == nil || !parent.Folder {
 				return nil, notFound("folder")
 			}
 		}
 		s.stamp(it, s.now())
+		madeByCaller(it)
 		// Folders come before requests, as Postman lists them.
 		list := c.col.Container(parent)
 		at := 0
@@ -575,12 +633,13 @@ func (s *Server) folderRoute(r *http.Request, c *collection, id string, body []b
 		}
 		c.col.Insert(parent, at, it)
 		s.touched(c, it)
-		return map[string]any{"data": map[string]any{"id": it.ID, "name": it.Name, "folder": in.Folder, "collection": c.col.Info.PostmanID}}, nil
+		return map[string]any{"data": map[string]any{"id": it.ID, "name": it.Name, "folder": in.Folder, "collection": c.col.Info.PostmanID, "owner": Caller}}, nil
 	}
-	it, _ := c.col.Find(id)
+	it := findItem(c.col, ref)
 	if it == nil || !it.Folder {
 		return nil, notFound("folder")
 	}
+	id := it.ID
 	switch r.Method {
 	case http.MethodGet:
 		return map[string]any{"data": map[string]any{"id": it.ID, "name": it.Name}}, nil
@@ -593,38 +652,29 @@ func (s *Server) folderRoute(r *http.Request, c *collection, id string, body []b
 	case http.MethodDelete:
 		c.col.Remove(id)
 		s.touched(c, nil)
-		return map[string]any{"model_id": id, "meta": map[string]any{"model": "folder", "action": "destroy"}, "data": map[string]any{"id": id, "owner": Owner}}, nil
+		return map[string]any{"model_id": id, "meta": map[string]any{"model": "folder", "action": "destroy"}, "data": map[string]any{"id": id, "owner": ownerOf(it.UID)}}, nil
 	}
 	return nil, notFound("endpoint")
 }
 
-func (s *Server) responseRoute(r *http.Request, c *collection, id string, body []byte) (any, *apiErr) {
-	if r.Method == http.MethodPost && id == "" {
-		rid, _ := own(r.URL.Query().Get("request"))
-		req, _ := c.col.Find(rid)
+func (s *Server) responseRoute(r *http.Request, c *collection, ref string, body []byte) (any, *apiErr) {
+	if r.Method == http.MethodPost && ref == "" {
+		req := findItem(c.col, r.URL.Query().Get("request"))
 		if req == nil || req.Folder {
 			return nil, notFound("request")
 		}
 		resp := &postman.Response{ID: newID()}
-		resp.UID = Owner + "-" + resp.ID
+		resp.UID = Caller + "-" + resp.ID
 		applyResponse(resp, body)
 		req.Response = append(req.Response, resp)
 		s.touched(c, req)
-		return map[string]any{"data": map[string]any{"id": resp.ID, "name": resp.Name, "request": req.ID}}, nil
+		return map[string]any{"data": map[string]any{"id": resp.ID, "name": resp.Name, "request": req.ID, "owner": Caller}}, nil
 	}
-	var owner *postman.Item
-	var found *postman.Response
-	c.col.Walk(func(it *postman.Item, _ []*postman.Item) bool {
-		for _, resp := range it.Response {
-			if resp.ID == id {
-				owner, found = it, resp
-			}
-		}
-		return true
-	})
+	owner, found := findResponse(c.col, ref)
 	if found == nil {
 		return nil, notFound("response")
 	}
+	id := found.ID
 	switch r.Method {
 	case http.MethodPut:
 		applyResponse(found, body)
@@ -662,11 +712,10 @@ func (s *Server) transfer(folders bool, body []byte) (any, *apiErr) {
 	}
 	var out []string
 	for _, uid := range in.IDs {
-		id, _ := own(uid)
 		var src *collection
 		var it *postman.Item
 		for _, c := range s.collections {
-			if found, _ := c.col.Find(id); found != nil {
+			if found := findUID(c.col, uid); found != nil {
 				src, it = c, found
 				break
 			}
@@ -685,9 +734,8 @@ func (s *Server) transfer(folders bool, body []byte) (any, *apiErr) {
 		if in.Target.Model == "collection" {
 			dst = s.findCollection(in.Target.ID)
 		} else {
-			tid, _ := own(in.Target.ID)
 			for _, c := range s.collections {
-				if f, _ := c.col.Find(tid); tid != "" && f != nil && f.Folder {
+				if f := findUID(c.col, in.Target.ID); f != nil && f.Folder {
 					dst, parent = c, f
 					break
 				}
@@ -721,7 +769,7 @@ func (s *Server) transfer(folders bool, body []byte) (any, *apiErr) {
 			}
 			stampAll(moving)
 		} else {
-			src.col.Remove(id)
+			src.col.Remove(it.ID)
 			s.touched(src, nil)
 		}
 		list := dst.col.Container(parent)
@@ -731,7 +779,7 @@ func (s *Server) transfer(folders bool, body []byte) (any, *apiErr) {
 			at = 0
 		case "before", "after":
 			for i, x := range *list {
-				if lid, _ := own(in.Location.ID); x.ID == lid {
+				if x.UID == in.Location.ID {
 					at = i
 					if in.Location.Position == "after" {
 						at++
@@ -741,7 +789,7 @@ func (s *Server) transfer(folders bool, body []byte) (any, *apiErr) {
 		}
 		dst.col.Insert(parent, region(*list, at, moving.Folder), moving)
 		s.touched(dst, moving)
-		out = append(out, Owner+"-"+moving.ID)
+		out = append(out, moving.UID)
 	}
 	return map[string]any{"ids": out}, nil
 }
@@ -827,11 +875,30 @@ func sortSummaries(list []postman.Summary) {
 	}
 }
 
+// findUID finds a request or folder of a collection by its uid, as the
+// transfer endpoints take them.
+func findUID(c *postman.Collection, uid string) *postman.Item {
+	var found *postman.Item
+	c.Walk(func(it *postman.Item, _ []*postman.Item) bool {
+		if found == nil && uid != "" && it.UID == uid {
+			found = it
+		}
+		return found == nil
+	})
+	return found
+}
+
+// ownerOf is the user whose an item is, by its uid.
+func ownerOf(uid string) string {
+	owner, _ := postman.SplitUID(uid)
+	return owner
+}
+
 // itemData is a request as the item endpoints answer it.
 func itemData(c *collection, it *postman.Item) map[string]any {
 	return map[string]any{"data": map[string]any{
 		"id": it.ID, "name": it.Name, "collection": c.col.Info.PostmanID,
-		"updatedAt": it.UpdatedAt, "createdAt": it.CreatedAt, "lastUpdatedBy": Owner, "owner": Owner,
+		"updatedAt": it.UpdatedAt, "createdAt": it.CreatedAt, "lastUpdatedBy": Owner, "owner": ownerOf(it.UID),
 	}}
 }
 

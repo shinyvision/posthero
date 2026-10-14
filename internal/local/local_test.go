@@ -290,7 +290,7 @@ func TestCreateAndMove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.here.CreateRequest(w.ctx, uid, fid, &postman.Item{Name: "Users", Request: &postman.Request{Method: "GET", URL: postman.Rebuild(nil, "{{base}}/users", nil, nil)}}); err != nil {
+	if _, err := w.here.CreateRequest(w.ctx, uid, fid.Ref(), &postman.Item{Name: "Users", Request: &postman.Request{Method: "GET", URL: postman.Rebuild(nil, "{{base}}/users", nil, nil)}}); err != nil {
 		t.Fatal(err)
 	}
 	// Health into Orders.
@@ -315,7 +315,7 @@ func TestCreateAndMove(t *testing.T) {
 		t.Fatal("Health didn't move in Postman")
 	}
 	here, _ := w.localCol()
-	if find(here, "Admin").ID != admin.ID || res.IDs[fid] != admin.ID {
+	if find(here, "Admin").ID != admin.ID || res.IDs[fid.ID] != admin.ID {
 		t.Fatal("the copy doesn't have Postman's ids")
 	}
 	if got := changes(w.c); got != "" {
@@ -500,7 +500,7 @@ func TestOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.here.Transfer(w.ctx, false, []string{owner + "-" + made}, postman.Place{Collection: uid, Folder: owner + "-" + products.ID, Position: "after", Next: owner + "-" + find(c, "Get product").ID}, false); err != nil {
+	if _, err := w.here.Transfer(w.ctx, false, []string{made.UID}, postman.Place{Collection: uid, Folder: owner + "-" + products.ID, Position: "after", Next: owner + "-" + find(c, "Get product").ID}, false); err != nil {
 		t.Fatal(err)
 	}
 	here, _ := w.localCol()

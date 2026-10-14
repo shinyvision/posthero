@@ -19,10 +19,12 @@ type remote struct {
 	globals []postman.EnvValue
 }
 
-// fetch gets the team's version, fetching what changed since the base (by
-// its time) and, whatever its time says, what changed here: Postman's list
-// may not show a change made a moment ago, and a push must not take the
-// base for the team's version of what it is about to send.
+// fetch gets the team's version: every collection, and the environments
+// that changed since the base (by their time) and, whatever their time
+// says, those that changed here: Postman's list may not show a change made
+// a moment ago, and a push must not take the base for the team's version
+// of what it is about to send. A collection's time says nothing: Postman
+// moves it when the collection itself changes, not what is in it.
 func (c *Copy) fetch(ctx context.Context, api *postman.Client) (*remote, error) {
 	fresh := map[string]bool{}
 	for _, ch := range c.Changes() {
@@ -36,18 +38,12 @@ func (c *Copy) fetch(ctx context.Context, api *postman.Client) (*remote, error) 
 	if err != nil {
 		return nil, err
 	}
-	// What didn't change since the base is the base's; the rest is
-	// fetched.
+	// An environment that didn't change since the base is the base's; the
+	// rest is fetched.
 	r := &remote{cols: map[string]Remote{}, envs: map[string]RemoteEnv{}}
-	var getCols, getEnvs []postman.Summary
+	getCols := sums
+	var getEnvs []postman.Summary
 	c.mu.Lock()
-	for _, sum := range sums {
-		if b := c.base.Cols[sum.ID]; b != nil && b.UpdatedAt == sum.UpdatedAt && !fresh[sum.ID] {
-			r.cols[sum.ID] = Remote{UID: sum.UID, UpdatedAt: sum.UpdatedAt, Data: b.tree()}
-		} else {
-			getCols = append(getCols, sum)
-		}
-	}
 	for _, sum := range envSums {
 		if b := c.base.Envs[sum.ID]; b != nil && b.UpdatedAt == sum.UpdatedAt && !fresh[sum.ID] {
 			r.envs[sum.ID] = RemoteEnv{UID: sum.UID, UpdatedAt: sum.UpdatedAt, Data: b.Env.Clone()}
@@ -577,7 +573,8 @@ func (c *Copy) Plan(ctx context.Context, api *postman.Client) (*Plan, error) {
 				continue
 			}
 			o := op{kind: "deleteCol", key: "collection:" + id, col: id, uid: s.UID, order: 3}
-			if s.UpdatedAt == b.UpdatedAt || colSame(s.Data, b.tree()) {
+			// (Not by its time: what is in it changes without moving that.)
+			if colSame(s.Data, b.tree()) {
 				p.ops = append(p.ops, o)
 			} else {
 				p.Conflicts = append(p.Conflicts, &Conflict{Key: "collection:" + id, Kind: "collection", What: "deleted here, changed in Postman", Col: id, Name: b.Props.Info.Name, BaseCol: b.Props, TheirsCol: props(s.Data), op: o})

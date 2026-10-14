@@ -848,3 +848,60 @@ func TestCollectionSettingsWithPostmansScripts(t *testing.T) {
 		t.Fatalf("the script in Postman: %q", got)
 	}
 }
+
+// Postman doesn't move a collection's updatedAt when what is in it
+// changes, so its list doesn't show a teammate's change to a request. R
+// fetches every collection again; refreshing by itself, posthero fetches
+// the open request's collection.
+func TestRefreshFindsTeammatesChanges(t *testing.T) {
+	d := newDriver(t)
+	d.open("get product")
+	var shopID, gqlID string
+	for _, c := range d.m.st.Collections() {
+		switch c.Name() {
+		case "Shop API":
+			shopID = c.Summary.ID
+		case "Shop GraphQL":
+			gqlID = c.Summary.ID
+		}
+	}
+	d.demo.Postman.Edit(gqlID, func(c *postman.Collection) *postman.Item {
+		it := findByName(c, "Me")
+		it.Name = "Who am I"
+		return it
+	})
+	d.demo.Postman.Edit(shopID, func(c *postman.Collection) *postman.Item {
+		it := findByName(c, "Get product")
+		it.Request.Header = append(it.Request.Header, postman.Param{Key: "X-Teammate", Value: "was here"})
+		return it
+	})
+	// By itself: the open request's collection.
+	d.exec(d.m.refresh(false))
+	d.settle()
+	d.see("X-Teammate: was here")
+	if findByName(d.m.st.Col(gqlID).Data, "Who am I") != nil {
+		t.Fatal("refreshing by itself fetched a collection that isn't open")
+	}
+	// R: all of them, and it says when it is done.
+	d.m.focusPane(paneTree)
+	d.keys("R")
+	d.waitFor("up to date with Postman")
+	if findByName(d.m.st.Col(gqlID).Data, "Who am I") == nil {
+		t.Fatal("R didn't find the teammate's change")
+	}
+
+	// R while a refresh runs: it goes once that one is done.
+	d.demo.Postman.Edit(gqlID, func(c *postman.Collection) *postman.Item {
+		it := findByName(c, "Who am I")
+		it.Name = "Me again"
+		return it
+	})
+	running := d.m.refresh(false)
+	d.keys("R")
+	d.see("asking Postman what changed…")
+	d.exec(running)
+	d.waitFor("up to date with Postman")
+	if findByName(d.m.st.Col(gqlID).Data, "Me again") == nil {
+		t.Fatal("the R asked for while a refresh ran didn't go")
+	}
+}

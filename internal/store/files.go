@@ -258,13 +258,13 @@ func (c *Conflict) Error() string {
 }
 
 // CheckRequest asks Postman whether a request of a collection (by its uid)
-// changed since known (its updatedAt as posthero has it). A nil Conflict
-// means it didn't.
-func CheckRequest(ctx context.Context, api *postman.Client, collection, itemID, known string) (*Conflict, error) {
+// changed since known (its updatedAt as posthero has it); ref is the
+// request's uid, or its id. A nil Conflict means it didn't.
+func CheckRequest(ctx context.Context, api *postman.Client, collection, ref, known string) (*Conflict, error) {
 	if api == nil || known == "" {
 		return nil, nil
 	}
-	info, err := api.RequestInfo(ctx, collection, itemID)
+	info, err := api.RequestInfo(ctx, collection, ref)
 	if err != nil {
 		if postman.IsNotFound(err) {
 			return nil, errors.New("this request was deleted in Postman")

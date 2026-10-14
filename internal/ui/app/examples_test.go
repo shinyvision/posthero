@@ -11,6 +11,7 @@ import (
 
 	"github.com/shinyvision/posthero/internal/config"
 	"github.com/shinyvision/posthero/internal/postman"
+	"github.com/shinyvision/posthero/internal/postman/pmtest"
 	"github.com/shinyvision/posthero/internal/secret"
 )
 
@@ -526,5 +527,66 @@ func TestEveryBindingOnAnExample(t *testing.T) {
 				t.Errorf("%s (%s) on an example changed something in Postman", b.keys, b.action)
 			}
 		}
+	}
+}
+
+// What posthero makes in a teammate's collection is the API key's user's
+// in Postman: its uid has that user's id, not the collection owner's.
+// Saving, renaming and deleting it afterwards works all the same.
+func TestChangeWhatWasMadeHere(t *testing.T) {
+	d := newDriver(t)
+	d.selectExample("Get product", "A product")
+	d.cmd("dup")
+	d.waitFor("copied A product to Get product")
+	if owner, _ := postman.SplitUID(d.example("Get product", "A product Copy").UID); owner != pmtest.Caller {
+		t.Fatalf("the copy is %s's, not the caller's", owner)
+	}
+	d.open("a product copy")
+	d.m.focusPane(paneEditor)
+	d.keys("<Esc>")
+	d.typeText(":%s/Mechanical keyboard/Clicky keyboard/")
+	d.keys("<CR>", ":w<CR>")
+	d.waitFor("saved A product Copy to Postman")
+	if ex := d.example("Get product", "A product Copy"); !strings.Contains(ex.Body, "Clicky keyboard") {
+		t.Fatalf("Postman has %q", ex.Body)
+	}
+	d.m.focusPane(paneTree)
+	d.selectExample("Get product", "A product Copy")
+	d.keys("r", "<C-u>")
+	d.typeText("Mine")
+	d.keys("<CR>")
+	d.waitFor("renamed to Mine")
+	d.selectExample("Get product", "Mine")
+	d.keys("D", "y")
+	d.waitFor("deleted Mine")
+	if d.example("Get product", "Mine") != nil {
+		t.Fatal("not deleted in Postman")
+	}
+
+	// A request made here, and an example of it.
+	d.selectItem("Get product")
+	d.keys("a")
+	d.typeText("Made here")
+	d.keys("<CR>")
+	d.waitFor("made Made here")
+	if it := findByName(d.colByName("Shop API"), "Made here"); it == nil || !strings.HasPrefix(it.UID, pmtest.Caller+"-") {
+		t.Fatalf("made %+v", it)
+	}
+	d.m.focusPane(paneEditor)
+	d.keys("<Esc>")
+	d.typeText(":%s/^GET/POST/")
+	d.keys("<CR>", ":w<CR>")
+	d.waitFor("saved Made here")
+	if it := findByName(d.colByName("Shop API"), "Made here"); it.Request.Method != "POST" {
+		t.Fatalf("Postman has %s", it.Request.Method)
+	}
+	d.cmd("example Mine")
+	d.waitFor("made Mine, an example of Made here")
+	d.keys("<Esc>")
+	d.typeText(":%s/200 OK/201/")
+	d.keys("<CR>", ":w<CR>")
+	d.waitFor("saved Mine")
+	if ex := d.example("Made here", "Mine"); ex == nil || ex.Code != 201 {
+		t.Fatalf("Postman has %+v", ex)
 	}
 }

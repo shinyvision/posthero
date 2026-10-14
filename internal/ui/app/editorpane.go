@@ -264,6 +264,22 @@ func (p *editorPane) changedOnServer(ref docRef, doc, base string) {
 	}
 }
 
+// shows reports whether the editor shows a document as Postman has it
+// (doc) already: then a refresh that found nothing new in it leaves the
+// buffer (and where the cursor is) be, and only takes its version (base).
+func (p *editorPane) shows(ref docRef, doc, base string) bool {
+	file := p.fileFor(ref)
+	have, err := os.ReadFile(file)
+	if err != nil || string(have) != doc {
+		return false
+	}
+	if t := p.texts[file]; t != "" && t != strings.TrimSuffix(doc, "\n") {
+		return false
+	}
+	p.bases[ref.id()] = base
+	return true
+}
+
 // text is the current text of a document: its draft, its buffer's as last
 // reported, or what Postman has (doc).
 func (p *editorPane) text(ref docRef, doc string) string {

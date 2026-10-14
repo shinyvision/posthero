@@ -305,24 +305,29 @@ func (m *Model) changeExample(colID, itemID string, op exampleOp, ex *postman.Re
 			}
 		}, func() tea.Msg { return result(made) })
 	}
-	api, uid := m.api, c.Summary.UID
+	// Postman names the request and the example by the uids it gave them,
+	// which have whoever made them: not always the collection's owner.
+	api, uid, req := m.api, c.Summary.UID, postman.Ref(it.ID, it.UID)
+	if cur := it.Example(ex.ID); cur != nil && op != opMake {
+		ex.UID = cur.UID
+	}
 	return m.run(w.busy, func(ctx context.Context) tea.Msg {
-		var made string
+		var made postman.Made
 		var err error
 		switch op {
 		case opMake:
-			made, err = api.CreateResponse(ctx, uid, itemID, ex)
+			made, err = api.CreateResponse(ctx, uid, req, ex)
 		case opSave:
 			err = api.UpdateResponse(ctx, uid, ex)
 		case opDelete:
-			err = api.DeleteResponse(ctx, uid, ex.ID)
+			err = api.DeleteResponse(ctx, uid, postman.Ref(ex.ID, ex.UID))
 		}
 		if err != nil {
 			out := result("")
 			out.err, out.undo = err, nil
 			return out
 		}
-		out := result(made)
+		out := result(made.ID)
 		out.col, out.err = api.Collection(ctx, uid)
 		return out
 	})
@@ -489,12 +494,14 @@ func (m *Model) moveExample(from docRef, toCol, toItem string, record bool) tea.
 	}
 	api := m.api
 	srcUID, dstUID := src.Summary.UID, dst.Summary.UID
+	toRef, fromRef := postman.Ref(to.ID, to.UID), postman.Ref(ex.ID, ex.UID)
 	return m.run("moving "+ex.Name, func(ctx context.Context) tea.Msg {
-		id, err := api.CreateResponse(ctx, dstUID, toItem, moved)
+		made, err := api.CreateResponse(ctx, dstUID, toRef, moved)
 		if err != nil {
 			return changedMsg{err: fmt.Errorf("couldn't move %s: %w", moved.Name, err)}
 		}
-		if err := api.DeleteResponse(ctx, srcUID, from.exID); err != nil {
+		id := made.ID
+		if err := api.DeleteResponse(ctx, srcUID, fromRef); err != nil {
 			// It is in both places now: a copy, then.
 			col, _ := api.Collection(ctx, dstUID)
 			return changedMsg{colID: toCol, col: col, err: fmt.Errorf("copied %s, but couldn't take it away from where it was: %w", moved.Name, err)}

@@ -173,7 +173,8 @@ func (m *Model) progress(msg progressMsg) tea.Cmd {
 	return nil
 }
 
-// refresh asks Postman what changed; force fetches the globals too.
+// refresh asks Postman what changed; force fetches the globals and every
+// collection too.
 func (m *Model) refresh(force bool) tea.Cmd {
 	if m.st == nil || m.st.API == nil || m.refreshing {
 		return nil
@@ -183,9 +184,13 @@ func (m *Model) refresh(force bool) tea.Cmd {
 	seq := m.refreshSeq
 	m.lastRefresh = time.Now()
 	plan := m.st.Plan(force)
+	plan.Recheck = m.recheck(force)
 	note := ""
-	if !m.loaded {
+	switch {
+	case !m.loaded:
 		note = "fetching " + orName(m.st.Workspace.Name, "the workspace")
+	case m.refreshAsked:
+		note = "asking Postman what changed"
 	}
 	run := m.run
 	if note == "" {
@@ -211,6 +216,37 @@ func (m *Model) refresh(force bool) tea.Cmd {
 	})
 }
 
+// recheck are the collections a refresh fetches again whatever Postman's
+// list says (Postman doesn't move a collection's updatedAt when what is in
+// it changes): the open request's, then the tree cursor's, and with force
+// every other one. The local copy's list does say, so local mode needs
+// none.
+func (m *Model) recheck(force bool) []string {
+	if m.local != nil {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	add := func(id string) {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	if m.open != nil {
+		add(m.open.colID)
+	}
+	if n := m.tree.Current(); n != nil && n.Col != nil {
+		add(n.Col.Summary.ID)
+	}
+	if force {
+		for _, c := range m.st.Collections() {
+			add(c.Summary.ID)
+		}
+	}
+	return out
+}
+
 func orName(s, def string) string {
 	if s == "" {
 		return def
@@ -223,14 +259,35 @@ func (m *Model) fetched(msg fetchedMsg) tea.Cmd {
 		return nil // a refresh that a newer one replaced
 	}
 	m.refreshing = false
+	asked := m.refreshAsked
+	m.refreshAsked = false
+	cmd := m.applyFetched(msg, asked)
+	if m.refreshAgain {
+		// Asked for while this one ran: it goes now.
+		m.refreshAgain = false
+		m.refreshAsked = true
+		cmd = tea.Batch(cmd, m.refresh(true))
+	}
+	return cmd
+}
+
+// applyFetched takes in what a refresh fetched; asked says it was asked
+// for, and the status bar says how it went.
+func (m *Model) applyFetched(msg fetchedMsg, asked bool) tea.Cmd {
 	if m.st == nil || msg.ws != m.st.Workspace.ID {
 		return nil
 	}
 	if msg.err != nil {
-		if !errors.Is(msg.err, context.Canceled) {
+		switch {
+		case !errors.Is(msg.err, context.Canceled):
 			m.setStatus("couldn't refresh from Postman: "+msg.err.Error(), true)
+		case asked:
+			m.setStatus("", false)
 		}
 		return nil
+	}
+	if asked {
+		m.setStatus("up to date with Postman", false)
 	}
 	first := !m.loaded
 	ch := m.st.Apply(msg.f)
@@ -256,7 +313,7 @@ func (m *Model) fetched(msg fetchedMsg) tea.Cmd {
 				what = "example"
 			}
 			c, _, _ := m.findItem(ref.colID, ref.itemID)
-			doc, _, ok := m.renderDoc(ref)
+			doc, base, ok := m.renderDoc(ref)
 			switch {
 			case !ok && c != nil && c.Data != nil && ref.exID != "":
 				m.setStatus("the open example was deleted in Postman; your text is still in the editor", true)
@@ -267,7 +324,7 @@ func (m *Model) fetched(msg fetchedMsg) tea.Cmd {
 					if m.editor.texts[m.open.file] != "" && strings.TrimSuffix(doc, "\n") != m.drafts.textOr(ref.id()) {
 						m.setStatus("someone changed this "+what+" in Postman; your changes are kept · :e! takes theirs", false)
 					}
-				} else {
+				} else if !m.editor.shows(ref, doc, base) {
 					m.docChanged(ref)
 					m.refreshShownExample()
 				}
@@ -438,7 +495,7 @@ func (m *Model) save(colID, itemID, text string, force bool) tea.Cmd {
 	}
 	return m.run("saving "+item.Name, func(ctx context.Context) tea.Msg {
 		if !force {
-			conflict, err := store.CheckRequest(ctx, api, c.Summary.UID, item.ID, known)
+			conflict, err := store.CheckRequest(ctx, api, c.Summary.UID, postman.Ref(item.ID, item.UID), known)
 			if err != nil {
 				return savedMsg{colID: colID, item: item, before: before, text: text, err: err}
 			}
