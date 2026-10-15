@@ -79,9 +79,12 @@ func FromItem(it *postman.Item, auth *postman.Auth, defaults Settings) *Request 
 	return r
 }
 
-// EffectiveAuth is the auth a request uses: its own, or the nearest
-// folder's, or the collection's ("inherit" walks up). Nil means none.
+// EffectiveAuth is the auth a request or folder uses: its own, or the
+// nearest parent's, or the collection's ("inherit" walks up). Nil means none.
 func EffectiveAuth(it *postman.Item, parents []*postman.Item, c *postman.Collection) (*postman.Auth, string) {
+	if it.Folder && it.Auth != nil && it.Auth.Type != "" && it.Auth.Type != "inherit" {
+		return it.Auth, "folder " + it.Name
+	}
 	if it.Request != nil && it.Request.Auth != nil && it.Request.Auth.Type != "" && it.Request.Auth.Type != "inherit" {
 		return it.Request.Auth, "request"
 	}

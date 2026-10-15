@@ -8,13 +8,14 @@ import (
 	"time"
 
 	"github.com/shinyvision/posthero/internal/jsonx"
-	"github.com/shinyvision/posthero/internal/postman"
 	"github.com/shinyvision/posthero/internal/secret"
 )
 
 // drafts are requests' (and examples') texts that differ from what Postman
 // has: changes not saved yet. They survive quitting, like unsaved tabs in
-// Postman.
+// Postman. This file spans workspaces: absence from the current store is
+// not evidence that a draft can be discarded. Only explicit saves,
+// discards and deletions clear drafts.
 type drafts struct {
 	mu    sync.Mutex
 	path  string
@@ -201,32 +202,4 @@ func (v *vault) save() error {
 	}
 	_ = os.MkdirAll(filepath.Dir(v.path), 0o700)
 	return os.WriteFile(v.path, data, 0o600)
-}
-
-// pruneDrafts drops the drafts of requests (and examples) that aren't in
-// any collection any more (a teammate deleted them), once every collection
-// is loaded.
-func (m *Model) pruneDrafts() {
-	if m.st == nil {
-		return
-	}
-	have := map[string]bool{}
-	for _, c := range m.st.Collections() {
-		if c.Data == nil {
-			return // not everything is here: nothing can be said to be gone
-		}
-		c.Data.Walk(func(it *postman.Item, _ []*postman.Item) bool {
-			have[it.ID] = true
-			for _, r := range it.Response {
-				have[r.ID] = true
-			}
-			return true
-		})
-	}
-	for id := range m.drafts.ids() {
-		if !have[id] && (m.open == nil || m.open.id() != id) {
-			m.drafts.drop(id)
-		}
-	}
-	m.updateMarks()
 }

@@ -314,29 +314,32 @@ func (m *Model) authOf(colID, itemID string) (auth.Config, *postman.Auth, string
 	return auth.ConfigFrom(auth.Resolve(a, set.Resolve)), a, from, true
 }
 
-// currentAuth is the OAuth 2.0 of the request in the editor or under the
-// tree's cursor.
-func (m *Model) currentAuth() (auth.Config, string, bool) {
+// currentAuthSource is the auth of what commands act on: the selected
+// tree node, or the open request when a right-hand pane has focus.
+// Folders inherit exactly as requests do; an explicit noauth stops it.
+func (m *Model) currentAuthSource() (*postman.Auth, string) {
 	n := m.treeNode()
-	if n == nil {
-		return auth.Config{}, "", false
+	if n == nil || n.Col.Data == nil {
+		return nil, "" // nothing selected, or still loading
 	}
-	if n.Col.Data == nil {
-		return auth.Config{}, "", false // still loading
+	if n.Item == nil {
+		return n.Col.Data.Auth, n.Col.Summary.ID
 	}
-	if n.Item == nil || n.Item.Folder {
-		// A collection or folder: the auth it gives its requests.
-		a := n.Col.Data.Auth
-		if n.Item != nil {
-			a = n.Item.Auth
-		}
-		if a == nil || a.Type != "oauth2" {
-			return auth.Config{}, "", false
-		}
-		return auth.ConfigFrom(auth.Resolve(a, m.scopes(n.Col.Summary.ID).Resolve)), n.Col.Summary.ID, true
+	c, it, parents := m.findItem(n.Col.Summary.ID, n.Item.ID)
+	if it == nil || c == nil || c.Data == nil {
+		return nil, ""
 	}
-	cfg, _, _, ok := m.authOf(n.Col.Summary.ID, n.Item.ID)
-	return cfg, n.Col.Summary.ID, ok
+	a, _ := send.EffectiveAuth(it, parents, c.Data)
+	return a, c.Summary.ID
+}
+
+// currentAuth is the OAuth 2.0 login used by auth commands and completion.
+func (m *Model) currentAuth() (auth.Config, string, bool) {
+	a, colID := m.currentAuthSource()
+	if a == nil || a.Type != "oauth2" {
+		return auth.Config{}, colID, false
+	}
+	return auth.ConfigFrom(auth.Resolve(a, m.scopes(colID).Resolve)), colID, true
 }
 
 // authSummary says how a request signs in.
@@ -373,18 +376,16 @@ func grantName(g string) string {
 	return g
 }
 
-// authLine is the status bar's note about the open request's login.
+// authLine describes the same login :auth, :token and :login act on.
 func (m *Model) authLine() string {
-	if m.open == nil {
-		return ""
-	}
-	cfg, a, _, ok := m.authOf(m.open.colID, m.open.itemID)
-	if !ok {
+	a, colID := m.currentAuthSource()
+	if a == nil || a.Type != "oauth2" {
 		if a != nil && a.Type != "noauth" {
 			return theme.Dim.Render(auth.Names[a.Type])
 		}
 		return ""
 	}
+	cfg := auth.ConfigFrom(auth.Resolve(a, m.scopes(colID).Resolve))
 	if !cfg.Fetches() {
 		return theme.Dim.Render("token from the settings")
 	}

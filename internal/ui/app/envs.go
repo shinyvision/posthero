@@ -808,11 +808,14 @@ func (m *Model) saveEnvNamed(e *store.Env, data *postman.Environment, u *undoEnt
 	}
 	api := m.api
 	uid := e.Summary.UID
-	name := data.Name
+	name, before := data.Name, e.Name()
 	return m.run("renaming", func(ctx context.Context) tea.Msg {
 		now, err := api.Environment(ctx, uid)
 		if err != nil {
 			return errorMsg{"Not renamed", fmt.Errorf("couldn't read the latest environment; nothing was saved: %w", err)}
+		}
+		if err := checkName(before, name, now.Name); err != nil {
+			return errorMsg{"Not renamed", err}
 		}
 		data = now.Clone()
 		data.Name = name
@@ -831,6 +834,7 @@ func (m *Model) saveEnvNamed(e *store.Env, data *postman.Environment, u *undoEnt
 
 // deleteEnv deletes an environment after asking.
 func (m *Model) deleteEnv(e *store.Env) tea.Cmd {
+	e = &store.Env{Summary: e.Summary, Data: e.Data.Clone(), Path: e.Path}
 	return modal.Show(&modal.Confirm{Title: "Delete " + e.Name() + "?", Body: "Your whole team loses it. u brings it back (as a new environment).", Yes: func() tea.Msg {
 		return cmdMsg{func() tea.Cmd {
 			snapshot := &store.Env{Summary: e.Summary, Data: e.Data.Clone()}
@@ -852,7 +856,11 @@ func (m *Model) dropEnv(e *store.Env, u *undoEntry) tea.Cmd {
 	}
 	api := m.api
 	uid, id, name := e.Summary.UID, e.Summary.ID, e.Name()
+	before := e.Data.Clone()
 	return m.run("deleting "+name, func(ctx context.Context) tea.Msg {
+		if err := checkEnvironment(ctx, api, uid, before); err != nil {
+			return errorMsg{"Not deleted", err}
+		}
 		if err := api.DeleteEnvironment(ctx, uid); err != nil {
 			return errorMsg{"Not deleted", err}
 		}

@@ -27,6 +27,10 @@ type Pushed struct {
 // in again, so the base is what Postman has now. A change that fails is
 // reported; the others still go.
 func (c *Copy) Push(ctx context.Context, api postman.API, p *Plan, overwrite map[string]bool, only string) (Pushed, error) {
+	res := Pushed{IDs: map[string]string{}}
+	if p == nil || p.r == nil || p.localState != c.localState() {
+		return res, stalePlan()
+	}
 	var ops []op
 	for _, o := range p.ops {
 		if only == "" || o.key == only {
@@ -36,18 +40,52 @@ func (c *Copy) Push(ctx context.Context, api postman.API, p *Plan, overwrite map
 	for _, cf := range p.Conflicts {
 		if overwrite[cf.Key] && (only == "" || cf.Key == only) {
 			ops = append(ops, cf.op)
+			if cf.move != nil {
+				ops = append(ops, *cf.move)
+			}
 		}
 	}
 	sort.SliceStable(ops, func(a, b int) bool { return ops[a].order < ops[b].order })
-	res := Pushed{IDs: map[string]string{}}
+	// Validate all selected resources before the first write. A stale
+	// conflict dialog must not partially execute its obsolete plan.
+	checked := map[string]bool{}
+	for _, o := range ops {
+		key := opResource(o)
+		if !checked[key] {
+			if err := c.checkPush(ctx, api, o, p.r); err != nil {
+				return res, fmt.Errorf("%s: %w", o.what(), err)
+			}
+			checked[key] = true
+		}
+	}
+	// Keep the reviewed plan immutable, including if Push is retried.
+	r := &remote{cols: map[string]Remote{}, envs: p.r.envs, globals: p.r.globals}
+	for id, col := range p.r.cols {
+		r.cols[id] = col
+	}
 	uids := map[string]string{}
 	var errs []error
+	blocked := map[string]bool{}
 	for _, o := range ops {
-		if err := c.exec(ctx, api, o, p.r, res.IDs, uids); err != nil {
+		key := opResource(o)
+		if blocked[key] {
+			continue
+		}
+		if err := c.checkPush(ctx, api, o, r); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", o.what(), err))
+			blocked[key] = true
+			continue
+		}
+		if err := c.exec(ctx, api, o, r, res.IDs, uids); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", o.what(), err))
+			blocked[key] = true // a failed operation may have partly succeeded
 			continue
 		}
 		res.Pushed++
+		if err := c.advancePush(ctx, api, o, r, res.IDs); err != nil {
+			errs = append(errs, fmt.Errorf("%s was pushed, but further changes were stopped: %w", o.what(), err))
+			blocked[key] = true
+		}
 	}
 	c.rename(res.IDs)
 	r, err := c.fetch(ctx, api)
@@ -277,6 +315,17 @@ func (c *Copy) placeItem(ctx context.Context, api postman.API, o op, itemID, par
 // mine is the request as it is here, with the uid Postman gave it; theirs
 // is Postman's, whose examples have theirs.
 func syncExamples(ctx context.Context, api postman.API, uid string, mine, theirs *postman.Item, ids, uids map[string]string) error {
+	check := func(before *postman.Response) error {
+		col, err := api.Collection(ctx, uid)
+		if err != nil {
+			return err
+		}
+		parent, now, _ := col.FindExample(before.ID)
+		if now == nil || parent.ID != mine.ID || fingerprint(before) != fingerprint(now) {
+			return stalePlan()
+		}
+		return nil
+	}
 	there := map[string]*postman.Response{}
 	if theirs != nil {
 		for _, r := range theirs.Response {
@@ -295,6 +344,9 @@ func syncExamples(ctx context.Context, api postman.API, uid string, mine, theirs
 			}
 			ids[r.ID], uids[rid.ID] = rid.ID, rid.UID
 		case fingerprint(t) != fingerprint(r):
+			if err := check(t); err != nil {
+				return err
+			}
 			r = r.Clone()
 			r.UID = t.UID
 			if err := api.UpdateResponse(ctx, uid, r); err != nil {
@@ -304,6 +356,9 @@ func syncExamples(ctx context.Context, api postman.API, uid string, mine, theirs
 	}
 	for rid, t := range there {
 		if !here[rid] {
+			if err := check(t); err != nil {
+				return err
+			}
 			if err := ignoreGone(api.DeleteResponse(ctx, uid, postman.Ref(t.ID, t.UID))); err != nil {
 				return err
 			}

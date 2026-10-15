@@ -131,6 +131,20 @@ func (m *Model) saveFolderSettings(c *store.Col, base, mine *postman.Item, u *un
 			}
 		}
 		col, err := api.Collection(ctx, uid)
+		if u != nil && err == nil {
+			// Undo only the fields this save changed, against the version
+			// actually saved. Keep teammate edits incorporated by the merge,
+			// and detect later edits even if Watch has refreshed the tree.
+			before := folder.Clone()
+			after, _ := col.Find(folder.ID)
+			if after != nil {
+				after = after.Clone()
+				undo := *u
+				undo.kind = undoRestore
+				undo.restore = func() tea.Cmd { return m.saveFolderSettings(c, after, before, nil) }
+				u = &undo
+			}
+		}
 		return editmodal.ResultMsg{Then: changedMsg{colID: colID, col: col, err: err, undo: u, note: "saved " + folder.Name + " " + to}}
 	})
 }

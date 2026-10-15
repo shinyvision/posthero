@@ -629,6 +629,9 @@ func (m *Model) pushTab(view *diffview.View, tab *diffview.Tab) tea.Cmd {
 		if err != nil {
 			return diffPushedMsg{view: view, tab: tab, err: err}
 		}
+		if err := p.CheckReviewed(cf); err != nil {
+			return diffPushedMsg{view: view, tab: tab, err: err}
+		}
 		res, err := c.Push(ctx, remote, p, map[string]bool{cf.Key: true}, cf.Key)
 		return diffPushedMsg{view: view, tab: tab, res: res, err: err}
 	})

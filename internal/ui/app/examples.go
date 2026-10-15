@@ -239,6 +239,7 @@ type exampleWork struct {
 	busy, note string
 	undo       *undoEntry
 	nameOnly   bool
+	base       *postman.Response // version acted on, when a dialog preceded the command
 	// undoMade is the undo of an example made, which needs its new id.
 	undoMade func(id string) *undoEntry
 	// selectID puts the tree's cursor on an item (or example); selectMade
@@ -312,7 +313,32 @@ func (m *Model) changeExample(colID, itemID string, op exampleOp, ex *postman.Re
 	if cur := it.Example(ex.ID); cur != nil && op != opMake {
 		ex.UID = cur.UID
 	}
+	base := w.base
+	if base == nil {
+		base = it.Example(ex.ID)
+	}
+	if base != nil {
+		base = base.Clone()
+	}
 	return m.run(w.busy, func(ctx context.Context) tea.Msg {
+		if op != opMake {
+			now, err := latestCollection(ctx, api, uid)
+			if err == nil {
+				parent, current, _ := now.FindExample(ex.ID)
+				if base == nil || current == nil || parent.ID != itemID {
+					err = mutationConflict()
+				} else if w.nameOnly {
+					err = checkName(base.Name, ex.Name, current.Name)
+				} else if !sameJSON(base, current) {
+					err = mutationConflict()
+				}
+			}
+			if err != nil {
+				out := result("")
+				out.err, out.undo = err, nil
+				return out
+			}
+		}
 		var made postman.Made
 		var err error
 		switch op {
@@ -365,13 +391,17 @@ func (m *Model) exampleTakeBack(what, colID, itemID, id string) *undoEntry {
 // renameExample gives an example another name; record says u can take it
 // back.
 func (m *Model) renameExample(ref docRef, name string, record bool) tea.Cmd {
+	return m.renameExampleExpected(ref, name, record, nil)
+}
+
+func (m *Model) renameExampleExpected(ref docRef, name string, record bool, base *postman.Response) tea.Cmd {
 	_, _, _, ex := m.findDoc(ref)
 	if ex == nil {
 		return nil
 	}
 	renamed := ex.Clone()
 	renamed.Name = name
-	w := exampleWork{busy: "renaming", note: "renamed to " + name, selectID: ex.ID, nameOnly: true}
+	w := exampleWork{base: base, busy: "renaming", note: "renamed to " + name, selectID: ex.ID, nameOnly: true}
 	if old := ex.Name; record {
 		w.undo = &undoEntry{what: "rename " + old, kind: undoRestore, restore: func() tea.Cmd {
 			return m.renameExample(ref, old, false)
@@ -389,12 +419,18 @@ func (m *Model) deleteExample(ref docRef) tea.Cmd {
 	return modal.Show(&modal.Confirm{
 		Title: "Delete the example " + ex.Name + "?",
 		Body:  "u brings it back.",
-		Yes:   func() tea.Msg { return cmdMsg{func() tea.Cmd { return m.removeExample(ref, true) }} },
+		Yes: func() tea.Msg {
+			return cmdMsg{func() tea.Cmd { return m.removeExampleExpected(ref, true, ex.Clone()) }}
+		},
 	})
 }
 
 // removeExample deletes an example; record says u can bring it back.
 func (m *Model) removeExample(ref docRef, record bool) tea.Cmd {
+	return m.removeExampleExpected(ref, record, nil)
+}
+
+func (m *Model) removeExampleExpected(ref docRef, record bool, base *postman.Response) tea.Cmd {
 	_, it, _, ex := m.findDoc(ref)
 	if ex == nil {
 		return nil
@@ -405,7 +441,7 @@ func (m *Model) removeExample(ref docRef, record bool) tea.Cmd {
 			at = i
 		}
 	}
-	w := exampleWork{busy: "deleting " + ex.Name, note: "took back: make " + ex.Name, selectID: it.ID, dropDrafts: []string{ex.ID}}
+	w := exampleWork{base: base, busy: "deleting " + ex.Name, note: "took back: make " + ex.Name, selectID: it.ID, dropDrafts: []string{ex.ID}}
 	if record {
 		was := ex.Clone()
 		w.note = "deleted " + ex.Name + " · u brings it back"
@@ -448,6 +484,10 @@ func (m *Model) copyExample(from docRef, toCol, toItem string) tea.Cmd {
 // moveExample moves an example to another request's examples (at the
 // end): a copy there, then the example here goes. u moves it back.
 func (m *Model) moveExample(from docRef, toCol, toItem string, record bool) tea.Cmd {
+	return m.moveExampleExpected(from, toCol, toItem, record, nil)
+}
+
+func (m *Model) moveExampleExpected(from docRef, toCol, toItem string, record bool, base *postman.Response) tea.Cmd {
 	src, _, _, ex := m.findDoc(from)
 	dst, to, _ := m.findItem(toCol, toItem)
 	if ex == nil || to == nil {
@@ -500,12 +540,42 @@ func (m *Model) moveExample(from docRef, toCol, toItem string, record bool) tea.
 	api := m.api
 	srcUID, dstUID := src.Summary.UID, dst.Summary.UID
 	toRef, fromRef := postman.Ref(to.ID, to.UID), postman.Ref(ex.ID, ex.UID)
+	before, destination := ex.Clone(), mutationSnapshot(dst)
+	if base != nil {
+		before = base.Clone()
+	}
 	return m.run("moving "+ex.Name, func(ctx context.Context) tea.Msg {
+		checkSource := func() error {
+			now, err := latestCollection(ctx, api, srcUID)
+			if err != nil {
+				return err
+			}
+			parent, current, _ := now.FindExample(before.ID)
+			if current == nil || parent.ID != from.itemID || !sameJSON(before, current) {
+				return mutationConflict()
+			}
+			return nil
+		}
+		if err := checkSource(); err != nil {
+			return changedMsg{err: err}
+		}
+		now, err := latestCollection(ctx, api, dstUID)
+		if err != nil {
+			return changedMsg{err: err}
+		}
+		if err := checkItem(destination.Data, now, to.ID); err != nil {
+			return changedMsg{err: err}
+		}
 		made, err := api.CreateResponse(ctx, dstUID, toRef, moved)
 		if err != nil {
 			return changedMsg{err: fmt.Errorf("couldn't move %s: %w", moved.Name, err)}
 		}
 		id := made.ID
+		// Moving an example is two writes. Check again before deleting the
+		// source, so an edit during the copy survives there.
+		if err := checkSource(); err != nil {
+			return changedMsg{err: fmt.Errorf("example copied, but the original was kept: %w", err)}
+		}
 		if err := api.DeleteResponse(ctx, srcUID, fromRef); err != nil {
 			// It is in both places now: a copy, then.
 			col, _ := api.Collection(ctx, dstUID)
@@ -548,7 +618,11 @@ func (m *Model) putExample(n *tree.Node) tea.Cmd {
 	if cut.copy {
 		return m.copyExample(from, toCol, to.ID)
 	}
-	return m.moveExample(from, toCol, to.ID, true)
+	var base *postman.Response
+	if cut.base != nil {
+		_, base, _ = cut.base.Data.FindExample(from.exID)
+	}
+	return m.moveExampleExpected(from, toCol, to.ID, true, base)
 }
 
 // lookupExample finds an example by its id, a Postman link to it, or its

@@ -65,6 +65,7 @@ func (m *Model) pushUndo(u undoEntry) {
 type cutState struct {
 	colID string
 	ids   []string
+	base  *store.Col // the source when it was cut
 	// example is the request of an example cut or copied (ids holds the
 	// example's id).
 	example string
@@ -272,6 +273,12 @@ func (m *Model) rename(n *tree.Node) tea.Cmd {
 	if n == nil {
 		return nil
 	}
+	snapshot := *n
+	snapshot.Col = mutationSnapshot(n.Col)
+	if n.Item != nil && snapshot.Col != n.Col {
+		snapshot.Item = n.Item.Clone()
+	}
+	n = &snapshot
 	old := n.Name()
 	return modal.Show(&modal.Input{Title: "Rename", Value: old, Regs: m.regs, Submit: func(name string) tea.Cmd {
 		name = strings.TrimSpace(name)
@@ -279,7 +286,7 @@ func (m *Model) rename(n *tree.Node) tea.Cmd {
 			return nil
 		}
 		if n.Kind == tree.Example {
-			return m.renameExample(nodeRef(n), name, true)
+			return m.renameExampleExpected(nodeRef(n), name, true, n.Example.Clone())
 		}
 		return m.setName(n.Col, n.Item, name, true)
 	}})
@@ -314,8 +321,26 @@ func (m *Model) setName(c *store.Col, it *postman.Item, name string, record bool
 	if it != nil {
 		ref, sel, folder = postman.Ref(it.ID, it.UID), it.ID, it.Folder
 	}
+	before := c.Name()
+	if it != nil {
+		before = it.Name
+	}
 	return m.run("renaming", func(ctx context.Context) tea.Msg {
-		var err error
+		now, err := latestCollection(ctx, api, uid)
+		if err != nil {
+			return changedMsg{err: err}
+		}
+		current := now.Info.Name
+		if sel != "" {
+			item, _ := now.Find(sel)
+			if item == nil {
+				return changedMsg{err: mutationConflict()}
+			}
+			current = item.Name
+		}
+		if err := checkName(before, name, current); err != nil {
+			return changedMsg{err: err}
+		}
 		switch {
 		case ref == "":
 			err = api.PatchCollection(ctx, uid, postman.CollectionPatch{Name: &name})
@@ -340,6 +365,12 @@ func (m *Model) deleteNode(n *tree.Node) tea.Cmd {
 	if n.Kind == tree.Example {
 		return m.deleteExample(nodeRef(n))
 	}
+	snapshot := *n
+	snapshot.Col = mutationSnapshot(n.Col)
+	if n.Item != nil && snapshot.Col != n.Col {
+		snapshot.Item = n.Item.Clone()
+	}
+	n = &snapshot
 	if n.Kind == tree.Collection {
 		return modal.Show(&modal.Confirm{
 			Title: "Delete the collection " + n.Name() + "?",
@@ -393,8 +424,15 @@ func (m *Model) remove(c *store.Col, it *postman.Item) tea.Cmd {
 	api := m.api
 	uid := c.Summary.UID
 	id, folder := postman.Ref(it.ID, it.UID), it.Folder
+	before := c.Data.Clone()
 	return m.run("deleting "+it.Name, func(ctx context.Context) tea.Msg {
-		var err error
+		now, err := latestCollection(ctx, api, uid)
+		if err != nil {
+			return changedMsg{err: err}
+		}
+		if err := checkItem(before, now, it.ID); err != nil {
+			return changedMsg{err: err}
+		}
 		if folder {
 			err = api.DeleteFolder(ctx, uid, id)
 		} else {
@@ -424,12 +462,21 @@ func (m *Model) deleteCollection(c *store.Col) tea.Cmd {
 func (m *Model) dropCollection(c *store.Col, u *undoEntry, note string) tea.Cmd {
 	api := m.api
 	uid, id, name := c.Summary.UID, c.Summary.ID, c.Name()
+	before := c.Data.Clone()
 	return m.run("deleting "+name, func(ctx context.Context) tea.Msg {
+		if err := checkCollection(ctx, api, uid, before); err != nil {
+			return errorMsg{"Not deleted", err}
+		}
 		if err := api.DeleteCollection(ctx, uid); err != nil {
 			return errorMsg{"Not deleted", err}
 		}
 		return cmdMsg{func() tea.Cmd {
 			m.st.RemoveCol(id)
+			for _, it := range before.Item {
+				for _, draftID := range itemIDs(it) {
+					m.drafts.drop(draftID)
+				}
+			}
 			m.dropOpenIfGone()
 			m.tree.SetData(m.st.Collections())
 			m.pushUndoOf(u)
@@ -523,7 +570,10 @@ func (m *Model) copyCollection(c *store.Col, ws postman.Workspace, envs []*store
 	here := ws.ID == m.st.Workspace.ID
 	from, name, uid, colID := m.st.Workspace.ID, c.Name(), c.Summary.UID, c.Summary.ID
 	where := "workspace " + ws.Name
-	type envCopy struct{ from, to postman.Summary }
+	type envCopy struct {
+		from, to postman.Summary
+		data     *postman.Environment
+	}
 	var envFrom []postman.Summary
 	if !here {
 		for _, e := range envs {
@@ -558,19 +608,21 @@ func (m *Model) copyCollection(c *store.Col, ws postman.Workspace, envs []*store
 				env.ID, env.UID, env.Owner, env.CreatedAt, env.UpdatedAt = "", "", "", "", ""
 				var to postman.Summary
 				if to, err = api.CreateEnvironment(ctx, ws.ID, env); err == nil {
-					made = append(made, envCopy{e, to})
+					data, readErr := api.Environment(ctx, to.UID)
+					made = append(made, envCopy{e, to, data})
+					if readErr != nil {
+						envErr = fmt.Errorf("%s was copied, but couldn't be fetched: %w", e.Name, readErr)
+					}
 					continue
 				}
 			}
 			envErr = fmt.Errorf("%s: %w", e.Name, err)
 		}
-		var full *postman.Collection
-		if here {
-			if full, err = api.Collection(ctx, sum.UID); err != nil {
-				return errorMsg{"Copied, but not fetched", err}
-			}
-			sum.UpdatedAt = full.Info.UpdatedAt
+		full, err := api.Collection(ctx, sum.UID)
+		if err != nil {
+			return errorMsg{"Copied, but not fetched", err}
 		}
+		sum.UpdatedAt = full.Info.UpdatedAt
 		return cmdMsg{func() tea.Cmd {
 			// Your current values go along: they live on this machine, by id.
 			if o := m.st.Values.Get(colID); len(o) > 0 {
@@ -606,10 +658,16 @@ func (m *Model) copyCollection(c *store.Col, ws postman.Workspace, envs []*store
 				// The copies are in the other workspace: u here takes them back.
 				m.pushUndo(undoEntry{what: what, kind: undoRestore, restore: func() tea.Cmd {
 					return m.run("taking back the copy of "+name, func(ctx context.Context) tea.Msg {
+						if err := checkCollection(ctx, api, sum.UID, full); err != nil {
+							return errorMsg{"Not taken back", err}
+						}
 						if err := api.DeleteCollection(ctx, sum.UID); err != nil {
 							return errorMsg{"Not taken back", err}
 						}
 						for _, e := range made {
+							if err := checkEnvironment(ctx, api, e.to.UID, e.data); err != nil {
+								return errorMsg{"Not all taken back", err}
+							}
 							if err := api.DeleteEnvironment(ctx, e.to.UID); err != nil {
 								return errorMsg{"Not all taken back", err}
 							}
@@ -657,13 +715,11 @@ func (m *Model) copyEnvTo(e *store.Env) tea.Cmd {
 			if err != nil {
 				return errorMsg{"Not copied", err}
 			}
-			var full *postman.Environment
-			if here {
-				if full, err = api.Environment(ctx, to.UID); err != nil {
-					return errorMsg{"Copied, but not fetched", err}
-				}
-				to.UpdatedAt = full.UpdatedAt
+			full, err := api.Environment(ctx, to.UID)
+			if err != nil {
+				return errorMsg{"Copied, but not fetched", err}
 			}
+			to.UpdatedAt = full.UpdatedAt
 			return cmdMsg{func() tea.Cmd {
 				if o := m.st.Values.Get(src.ID); len(o) > 0 {
 					_ = m.st.Values.Set(to.ID, o)
@@ -679,6 +735,9 @@ func (m *Model) copyEnvTo(e *store.Env) tea.Cmd {
 				if m.st.Workspace.ID == from {
 					m.pushUndo(undoEntry{what: what, kind: undoRestore, restore: func() tea.Cmd {
 						return m.run("taking back the copy of "+src.Name, func(ctx context.Context) tea.Msg {
+							if err := checkEnvironment(ctx, api, to.UID, full); err != nil {
+								return errorMsg{"Not taken back", err}
+							}
 							if err := api.DeleteEnvironment(ctx, to.UID); err != nil {
 								return errorMsg{"Not taken back", err}
 							}
@@ -699,7 +758,7 @@ func (m *Model) cutNode(n *tree.Node, copy bool) {
 		m.setStatus("a collection stays where it is; yy copies it, to this workspace or another", true)
 		return
 	}
-	m.cut = &cutState{colID: n.Col.Summary.ID, ids: []string{n.Item.ID}, copy: copy}
+	m.cut = &cutState{colID: n.Col.Summary.ID, ids: []string{n.Item.ID}, copy: copy, base: mutationSnapshot(n.Col)}
 	if n.Kind == tree.Example {
 		m.cut.ids, m.cut.example = []string{n.Example.ID}, n.Item.ID
 		m.updateMarks()
@@ -857,7 +916,14 @@ func (m *Model) put(n *tree.Node, above bool) tea.Cmd {
 	if cut.copy {
 		verb = "copied"
 	}
+	source, destination := mutationSnapshot(src), mutationSnapshot(dst)
+	if cut.base != nil {
+		source = cut.base
+	}
 	return m.run(strings.TrimSuffix(verb, "d")+"ing "+it.Name, func(ctx context.Context) tea.Msg {
+		if err := checkTransfer(ctx, api, source, destination, it.ID, cut.copy); err != nil {
+			return changedMsg{err: err}
+		}
 		got, err := api.Transfer(ctx, it.Folder, ids, place, cut.copy)
 		if err != nil {
 			return changedMsg{err: fmt.Errorf("couldn't move %s: %w", it.Name, err)}
@@ -1000,7 +1066,11 @@ func (m *Model) putBefore(c, from *store.Col, it *postman.Item, parent string, n
 	ids := []string{itemUID(from, it)}
 	colID, uid := c.Summary.ID, c.Summary.UID
 	fromID, fromUID := from.Summary.ID, from.Summary.UID
+	source, destination := mutationSnapshot(from), mutationSnapshot(c)
 	return m.run("moving "+it.Name+" back", func(ctx context.Context) tea.Msg {
+		if err := checkTransfer(ctx, api, source, destination, it.ID, false); err != nil {
+			return changedMsg{err: err}
+		}
 		got, err := api.Transfer(ctx, it.Folder, ids, place, false)
 		if err != nil {
 			return changedMsg{err: err}
@@ -1024,12 +1094,19 @@ func (m *Model) putBefore(c, from *store.Col, it *postman.Item, parent string, n
 func (m *Model) removeQuiet(c *store.Col, it *postman.Item, note string) tea.Cmd {
 	colID := c.Summary.ID
 	if c.Path != "" || m.st.API == nil {
-		return m.saveFile(c, func() { c.Data.Remove(it.ID) }, func() tea.Msg { return changedMsg{colID: colID, note: note} })
+		return m.saveFile(c, func() { c.Data.Remove(it.ID) }, func() tea.Msg { return changedMsg{colID: colID, dropDrafts: itemIDs(it), note: note} })
 	}
 	api := m.api
 	uid, id, folder := c.Summary.UID, postman.Ref(it.ID, it.UID), it.Folder
+	before := c.Data.Clone()
 	return m.run("taking it back", func(ctx context.Context) tea.Msg {
-		var err error
+		now, err := latestCollection(ctx, api, uid)
+		if err != nil {
+			return changedMsg{err: err}
+		}
+		if err := checkItem(before, now, it.ID); err != nil {
+			return changedMsg{err: err}
+		}
 		if folder {
 			err = api.DeleteFolder(ctx, uid, id)
 		} else {
@@ -1039,7 +1116,7 @@ func (m *Model) removeQuiet(c *store.Col, it *postman.Item, note string) tea.Cmd
 			return changedMsg{err: err}
 		}
 		col, err := api.Collection(ctx, uid)
-		return changedMsg{colID: colID, col: col, err: err, note: note}
+		return changedMsg{colID: colID, col: col, err: err, dropDrafts: itemIDs(it), note: note}
 	})
 }
 
@@ -1063,8 +1140,15 @@ func (m *Model) restore(c *store.Col, it *postman.Item, note string) tea.Cmd {
 		it = it.Clone()
 		it.UID = cur.UID
 	}
+	before := c.Data.Clone()
 	return m.run("restoring "+it.Name, func(ctx context.Context) tea.Msg {
-		var err error
+		now, err := latestCollection(ctx, api, uid)
+		if err != nil {
+			return changedMsg{err: err}
+		}
+		if err := checkItem(before, now, it.ID); err != nil {
+			return changedMsg{err: err}
+		}
 		if it.Folder {
 			err = api.UpdateFolder(ctx, uid, it)
 		} else {

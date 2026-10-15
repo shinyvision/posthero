@@ -325,7 +325,8 @@ func mergeCol(l *postman.Collection, b *ColBase, s Remote) (m *postman.Collectio
 		bi := b.Items[id]
 		if bi == nil || !sameItem(it.Item, bi.Item) {
 			changedHere[id] = true
-		} else if place(li, id, lb) != place(b.Items, id, lb) {
+		}
+		if bi != nil && place(li, id, lb) != place(b.Items, id, lb) {
 			movedHere[id] = true
 		}
 	}
@@ -503,15 +504,18 @@ type Conflict struct {
 	BaseCol, MineCol, TheirsCol *postman.Collection
 	BaseEnv, MineEnv, TheirsEnv *postman.Environment
 
-	op op // what pushing it anyway does
+	op       op  // what pushing it anyway does
+	move     *op // an accompanying move needs the same approval
+	reviewed *remote
 }
 
 // Plan is what a push would do: changes that can go as they are, and
 // conflicts to answer first.
 type Plan struct {
-	ops       []op
-	Conflicts []*Conflict
-	r         *remote
+	ops        []op
+	Conflicts  []*Conflict
+	r          *remote
+	localState string
 }
 
 // Changes counts what the plan pushes without asking.
@@ -548,7 +552,7 @@ func (c *Copy) Plan(ctx context.Context, api postman.API) (*Plan, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	cols, envs, globals := c.srv.Contents(c.ws.ID)
-	p := &Plan{r: r}
+	p := &Plan{r: r, localState: localStateOf(cols, envs, globals)}
 	local := map[string]*postman.Collection{}
 	for _, l := range cols {
 		local[l.Info.PostmanID] = l
@@ -663,6 +667,9 @@ func (c *Copy) Plan(ctx context.Context, api postman.API) (*Plan, error) {
 		}
 	}
 	sort.SliceStable(p.ops, func(a, b int) bool { return p.ops[a].order < p.ops[b].order })
+	for _, cf := range p.Conflicts {
+		cf.reviewed = r
+	}
 	return p, nil
 }
 
@@ -737,7 +744,36 @@ func (c *Copy) planCol(p *Plan, l *postman.Collection, b *ColBase, s Remote) {
 			}
 		}
 		if bi != nil && sit != nil && place(li, iid, lb) != place(b.Items, iid, lb) {
-			p.ops = append(p.ops, mk("move", 2))
+			moving := mk("move", 2)
+			both := func(x string) bool { return li[x] != nil && b.Items[x] != nil && si[x] != nil }
+			before, mine, theirs := place(b.Items, iid, both), place(li, iid, both), place(si, iid, both)
+			var conflict *Conflict
+			for _, cf := range p.Conflicts {
+				if cf.Key == key {
+					conflict = cf
+					break
+				}
+			}
+			switch {
+			case mine == theirs:
+				// The team already put it where we want it.
+			case conflict != nil:
+				conflict.move = &moving
+			case theirs != before:
+				cf := &Conflict{Key: key, Kind: kind(it.Folder), What: "changed here and in Postman", Col: id, Item: iid, Name: name, Base: bi.Item, Mine: lit.Item, Theirs: sit.Item, op: moving}
+				// A content edit and a conflicting move of the same item are
+				// reviewed together, and neither runs when that review is skipped.
+				for i, o := range p.ops {
+					if o.key == key && o.kind == "update" {
+						cf.op, cf.move = o, &moving
+						p.ops = append(p.ops[:i], p.ops[i+1:]...)
+						break
+					}
+				}
+				p.Conflicts = append(p.Conflicts, cf)
+			default:
+				p.ops = append(p.ops, moving)
+			}
 		}
 		return true
 	})

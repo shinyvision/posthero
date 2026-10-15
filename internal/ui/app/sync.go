@@ -351,7 +351,6 @@ func (m *Model) applyFetched(msg fetchedMsg, asked bool) tea.Cmd {
 	ch := m.st.Apply(msg.f)
 	m.loaded = true
 	m.dropOpenIfGone()
-	m.pruneDrafts()
 	if len(msg.f.Errors) > 0 {
 		m.setStatus(msg.f.Errors[0].Error(), true)
 		for _, err := range msg.f.Errors {
@@ -511,8 +510,9 @@ func (m *Model) openItem(colID, itemID string, focus bool) tea.Cmd {
 // savedMsg is how saving a request went.
 type savedMsg struct {
 	colID     string
-	item      *postman.Item // what was saved
-	before    *postman.Item // what it was
+	col       *postman.Collection // server-normalized result, when fetched
+	item      *postman.Item       // what was saved
+	before    *postman.Item       // what it was
 	updatedAt string
 	conflict  *store.Conflict
 	text      string
@@ -568,7 +568,14 @@ func (m *Model) save(colID, itemID, text string, force bool) tea.Cmd {
 			}
 		}
 		at, err := api.UpdateRequest(ctx, c.Summary.UID, item)
-		return savedMsg{colID: colID, item: item, before: before, updatedAt: at, text: text, err: err}
+		var col *postman.Collection
+		if err == nil {
+			// Postman fills in fields on save. Retain that representation
+			// for later mutations instead of mistaking normalization for
+			// a teammate's edit. A failed read doesn't undo a successful save.
+			col, _ = api.Collection(ctx, c.Summary.UID)
+		}
+		return savedMsg{colID: colID, col: col, item: item, before: before, updatedAt: at, text: text, err: err}
 	})
 }
 
@@ -628,7 +635,11 @@ func (m *Model) saved(msg savedMsg) tea.Cmd {
 		return nil
 	}
 	msg.item.UpdatedAt = msg.updatedAt
-	replaceItem(c, msg.item)
+	if msg.col != nil {
+		c.Data = msg.col
+	} else {
+		replaceItem(c, msg.item)
+	}
 	m.st.Touched(msg.colID, "")
 	m.editor.bases[msg.item.ID] = msg.updatedAt
 	// What was typed after the save stays a draft, on top of this version.
