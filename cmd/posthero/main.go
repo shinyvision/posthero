@@ -14,9 +14,12 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/shinyvision/posthero/internal/auth"
+	"github.com/shinyvision/posthero/internal/cli"
 	"github.com/shinyvision/posthero/internal/config"
 	"github.com/shinyvision/posthero/internal/demo"
+	"github.com/shinyvision/posthero/internal/postman"
 	"github.com/shinyvision/posthero/internal/postman/signin"
+	"github.com/shinyvision/posthero/internal/postman/syncapi"
 	"github.com/shinyvision/posthero/internal/secret"
 	"github.com/shinyvision/posthero/internal/ui/app"
 )
@@ -39,6 +42,7 @@ Options:
   -h, --help               show this help
   -v, --version            print the version
 
+` + cli.Usage + `
 Connecting:
   Sign in with your Postman account in your browser, or use an API key.
   The login goes in the system keyring. :connect opens browser sign-in;
@@ -95,6 +99,9 @@ func run() error {
 	if showVersion {
 		fmt.Println("posthero", appVersion())
 		return nil
+	}
+	if args := flags.Args(); len(args) > 0 && cli.IsCommand(args[0]) && !useDemo {
+		return command(workspace, args)
 	}
 	dir, _ := os.Getwd()
 	opts := app.Options{Dir: dir, Version: appVersion()}
@@ -179,6 +186,58 @@ func run() error {
 		fmt.Fprintln(os.Stderr, "posthero:", note)
 	}
 	return nil
+}
+
+// command runs one of the commands for scripts, with posthero's login.
+func command(workspace string, args []string) error {
+	login, ok, err := config.LoadLogin()
+	if !ok {
+		if err == nil {
+			err = errors.New("no Postman login; run posthero once to sign in")
+		}
+		return err
+	}
+	ctx := context.Background()
+	var api postman.API
+	if login.Session != nil {
+		opts, _, err := config.PostmanClient(ctx, true)
+		if err != nil {
+			return err
+		}
+		// A renewed session is kept, as the screen keeps it.
+		opts.OnSession = func(s syncapi.Session) error { _, err := config.SaveSession(s); return err }
+		c := syncapi.NewSession(*login.Session, opts)
+		defer c.Close()
+		api = c
+	} else {
+		api = postman.NewClient(login.APIKey, "")
+	}
+	state := config.LoadState()
+	rc, _ := config.LoadRC()
+	if workspace == "" {
+		workspace = rc.Settings.Workspace
+	}
+	e := &cli.Env{
+		API: api, Workspace: workspace, Last: state.Workspace,
+		Local: func(id string) bool { return state.Local[id] },
+		In:    os.Stdin, Out: os.Stdout,
+	}
+	e.Sending = &cli.Sending{Settings: rc.Settings, Certs: rc.Certs, Envs: state.Env}
+	if e.Sending.Dir, err = os.Getwd(); err != nil {
+		return err
+	}
+	if rc.Settings.Workdir != "" {
+		e.Sending.Dir = rc.Settings.Workdir
+	}
+	if e.Sending.StateDir, err = makeDir(config.StateDir); err != nil {
+		return err
+	}
+	e.Sending.CacheDir, _ = makeDir(config.CacheDir)
+	err = cli.Run(ctx, e, args)
+	if postman.IsUnauthorized(err) {
+		err = fmt.Errorf("%w (Postman didn't accept the login; sign in again in posthero)", err)
+	}
+	return err
 }
 
 // isFile reports whether a command-line argument is a file to open.

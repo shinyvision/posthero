@@ -188,6 +188,32 @@ posthero keeps a copy of the workspace so you can browse it offline. In local mo
 
 Each workspace remembers whether it's local, so one can be local while another isn't.
 
+## Commands for scripts
+
+posthero also works without the screen, for scripts and for agents such as Claude Code. Each command does one thing in the workspace, prints plain text and exits. They use your posthero login and the workspace you had open last; `-w NAME` picks another.
+
+```sh
+posthero workspaces                          # the workspaces, with ids
+posthero ls                                  # the collections
+posthero ls -l "Shop/Orders"                 # what is in a folder, with ids and when each changed
+posthero cat "Shop/Orders/Get order"         # a request as text, as the editor shows it
+posthero mkdir "Shop/Orders/Refunds"         # a new folder
+posthero add "Shop/Orders/Refunds/Make refund" refund.txt   # a new request, from its text
+posthero save "Shop/Orders/Get order" -      # new text for a request, from stdin
+posthero send "Shop/Orders/Get order"        # send it, as ⏎ does
+posthero send "Shop/Orders/Get order" -      # send this text instead, without saving it
+posthero env cat "Shop - Local"              # an environment's variables, secrets masked
+posthero env set "Shop - Local" baseUrl http://localhost:8080   # change a shared value
+```
+
+A path is the collection, the folders and the item, joined with `/`. Each part is a name (exactly, else ignoring case) or an id; write a `/` in a name as `\/`. `add` and `mkdir` refuse a name that is there already, so a path always names one thing.
+
+The text is the request as described under [The request is text](#the-request-is-text). `save --since TIME` saves only when nobody changed the request in Postman after TIME, the time `ls -l` shows: read with `ls -l` and `cat`, then save with `--since`, and a teammate's change in between isn't overwritten. Changes go to Postman directly, so a workspace in local mode refuses them.
+
+`env set` changes the shared (initial) value, the one your team gets; everyone's own current value stays as it is on their machine, as in Postman.
+
+`send` sends a request the way `⏎` does: its scripts, its auth (with the logins and passwords posthero keeps; a login that needs you fails and asks you to send the request once in posthero), the cookies, and the environment you picked for the collection, or another with `-e NAME`; `--var KEY=VALUE` (again for each) sets a variable for this send only, over the environment's, as newman's `--env-var` does. It prints the request line, the tests, the console, the status and the body; `-o FILE` writes the body to a file, which is how a PDF or an image comes out. Variables the scripts set are kept as they are when you send from the screen, and failing tests make the command fail.
+
 ## Opening exports instead
 
 `posthero shop.postman_collection.json local.postman_environment.json` opens exported files without a Postman account. `:w` then writes the file.
