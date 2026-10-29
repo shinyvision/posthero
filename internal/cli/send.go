@@ -74,7 +74,9 @@ func sendRequest(ctx context.Context, e *Env, args []string) error {
 		cache = filepath.Join(s.CacheDir, "workspaces")
 	}
 	st := store.Open(e.API, ws, cache, stateFile(s.StateDir, "values"))
-	fetched, err := store.Fetch(ctx, st.Plan(false))
+	plan := st.Plan(false)
+	plan.Recheck = named(st, args[0])
+	fetched, err := store.Fetch(ctx, plan)
 	if err != nil {
 		return err
 	}
@@ -125,6 +127,23 @@ func sendRequest(ctx context.Context, e *Env, args []string) error {
 		envLabel = env.Name()
 	}
 	return report(e.Out, ex, envLabel, output)
+}
+
+// named are the cached collections (ids) path may start with, to fetch
+// again whatever their updatedAt says: Postman doesn't move it when what is
+// in a collection changes, so the cache could lack a request added since.
+func named(st *store.Store, path string) []string {
+	parts := splitPath(path)
+	if len(parts) == 0 {
+		return nil
+	}
+	var ids []string
+	for _, c := range st.Collections() {
+		if c.Summary.ID == parts[0] || c.Summary.UID == parts[0] || strings.EqualFold(c.Summary.Name, parts[0]) {
+			ids = append(ids, c.Summary.ID)
+		}
+	}
+	return ids
 }
 
 // pickEnv is the environment to send with: the one named, else the one

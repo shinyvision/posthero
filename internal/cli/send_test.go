@@ -117,6 +117,26 @@ func TestSendFailing(t *testing.T) {
 	}
 }
 
+// TestSendAdded sends a request added after the collection was cached:
+// Postman doesn't move a collection's updatedAt when what is in it changes,
+// so the cache alone doesn't know it.
+func TestSendAdded(t *testing.T) {
+	_, e, out, _ := sending(t)
+	if err := cmd(t, e, "", "send", "Shop/Get order"); err != nil {
+		t.Fatalf("send: %v\n%s", err, out)
+	}
+	if err := cmd(t, e, "GET {{base}}/orders/1\n", "add", "Shop/Added order"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	out.Reset()
+	if err := cmd(t, e, "", "send", "Shop/Added order"); err != nil {
+		t.Fatalf("send what was added after the cache: %v\n%s", err, out)
+	}
+	if !strings.Contains(out.String(), "/orders/1 · Local\n") {
+		t.Errorf("sending what was added:\n%s", out)
+	}
+}
+
 func TestSendVar(t *testing.T) {
 	_, e, out, _ := sending(t)
 	base := api(t)
