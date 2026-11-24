@@ -200,15 +200,16 @@ posthero cat "Shop/Orders/Get order"         # a request as text, as the editor 
 posthero mkdir "Shop/Orders/Refunds"         # a new folder
 posthero add "Shop/Orders/Refunds/Make refund" refund.txt   # a new request, from its text
 posthero save "Shop/Orders/Get order" -      # new text for a request, from stdin
+posthero rename "Shop/Orders/Get order" "Get an order"      # a new name for a request, folder or collection
 posthero send "Shop/Orders/Get order"        # send it, as ⏎ does
 posthero send "Shop/Orders/Get order" -      # send this text instead, without saving it
 posthero env cat "Shop - Local"              # an environment's variables, secrets masked
 posthero env set "Shop - Local" baseUrl http://localhost:8080   # change a shared value
 ```
 
-A path is the collection, the folders and the item, joined with `/`. Each part is a name (exactly, else ignoring case) or an id; write a `/` in a name as `\/`. `add` and `mkdir` refuse a name that is there already, so a path always names one thing.
+A path is the collection, the folders and the item, joined with `/`. Each part is a name (exactly, else ignoring case) or an id; write a `/` in a name as `\/`. `add`, `mkdir` and `rename` refuse a name that is there already, so a path always names one thing.
 
-The text is the request as described under [The request is text](#the-request-is-text). `save --since TIME` saves only when nobody changed the request in Postman after TIME, the time `ls -l` shows: read with `ls -l` and `cat`, then save with `--since`, and a teammate's change in between isn't overwritten. Changes go to Postman directly, so a workspace in local mode refuses them.
+The text is the request as described under [The request is text](#the-request-is-text). `save --since TIME` saves only when nobody changed the request in Postman after TIME, the time `ls -l` shows: read with `ls -l` and `cat`, then save with `--since`, and a teammate's change in between isn't overwritten. `rename --since TIME` does the same for a new name. Changes go to Postman directly, so a workspace in local mode refuses them.
 
 `env set` changes the shared (initial) value, the one your team gets; everyone's own current value stays as it is on their machine, as in Postman.
 

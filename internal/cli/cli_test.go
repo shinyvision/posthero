@@ -114,6 +114,69 @@ func TestSaveSince(t *testing.T) {
 	}
 }
 
+func TestRename(t *testing.T) {
+	_, e, out := shop(t)
+	if err := cmd(t, e, "", "rename", "Shop/Orders/Get order", "Get an order"); err != nil || !strings.HasPrefix(out.String(), "renamed Get order to Get an order\t") {
+		t.Fatalf("rename a request: %v, %q", err, out)
+	}
+	out.Reset()
+	if err := cmd(t, e, "", "cat", "Shop/Orders/Get an order"); err != nil || out.String() != getOrder {
+		t.Fatalf("the renamed request keeps its text: %v, %q", err, out)
+	}
+	if err := cmd(t, e, "", "cat", "Shop/Orders/Get order"); err == nil {
+		t.Error("the old name still finds the request")
+	}
+	out.Reset()
+	if err := cmd(t, e, "", "rename", `Shop/a\/b`, "c/d"); err != nil || !strings.HasPrefix(out.String(), "renamed a/b/ to c/d/\t") {
+		t.Fatalf("rename a folder: %v, %q", err, out)
+	}
+	out.Reset()
+	if err := cmd(t, e, "", "ls", "Shop"); err != nil || !strings.Contains(out.String(), "c/d/\t") || !strings.Contains(out.String(), "  GET Get an order\t") {
+		t.Errorf("ls after renaming: %v\n%s", err, out)
+	}
+	if err := cmd(t, e, "", "rename", "Shop/Orders", `c/d`); err == nil || !strings.Contains(err.Error(), "already") {
+		t.Errorf("renaming to a name that is there already: %v", err)
+	}
+	out.Reset()
+	if err := cmd(t, e, "", "rename", "Shop/Orders", "Orders"); err != nil || out.String() != "no changes to save\n" {
+		t.Errorf("renaming to the same name: %v, %q", err, out)
+	}
+	if err := cmd(t, e, "", "rename", "Shop/Orders", " "); err == nil {
+		t.Error("renaming to a blank name worked")
+	}
+	if err := cmd(t, e, "", "rename", "Shop/Orders/Get an order"); err == nil {
+		t.Error("rename without a new name worked")
+	}
+	out.Reset()
+	if err := cmd(t, e, "", "rename", "Shop", "Webshop"); err != nil || !strings.HasPrefix(out.String(), "renamed Shop to Webshop\t") {
+		t.Fatalf("rename a collection: %v, %q", err, out)
+	}
+	out.Reset()
+	if err := cmd(t, e, "", "ls"); err != nil || !strings.HasPrefix(out.String(), "Webshop\t") {
+		t.Errorf("ls after renaming the collection: %v, %q", err, out)
+	}
+}
+
+func TestRenameSince(t *testing.T) {
+	_, e, out := shop(t)
+	if err := cmd(t, e, "", "ls", "-l", "Shop/Orders/Get order"); err != nil {
+		t.Fatal(err)
+	}
+	fields := strings.Split(strings.TrimSpace(out.String()), "\t")
+	since := fields[len(fields)-1]
+	if err := cmd(t, e, "", "rename", "--since", since, "Shop/Orders/Get order", "Get an order"); err != nil {
+		t.Fatalf("rename since the version read: %v", err)
+	}
+	// The fake's clock moved on: what was read is older than Postman's now.
+	err := cmd(t, e, "", "rename", "Shop/Orders/Get an order", "Fetch order", "--since", since)
+	if err == nil || !strings.Contains(err.Error(), "changed in Postman") {
+		t.Errorf("rename over a newer version: %v", err)
+	}
+	if err := cmd(t, e, "", "rename", "--since", "2000-01-01T00:00:00Z", "Shop/Orders", "Bestellingen"); err == nil || !strings.Contains(err.Error(), "changed in Postman") {
+		t.Errorf("rename a folder changed after --since: %v", err)
+	}
+}
+
 func TestPaths(t *testing.T) {
 	_, e, out := shop(t)
 	if err := cmd(t, e, "", "mkdir", `Shop/a\/b/c`); err != nil {

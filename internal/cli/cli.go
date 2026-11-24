@@ -35,6 +35,8 @@ const Usage = `Commands (for scripts; each prints plain text and exits):
                                  --since TIME, only when nobody changed it
                                  after TIME (from ls -l)
   posthero mkdir PATH            make the folder PATH
+  posthero rename PATH NAME      rename the request, folder or collection
+                                 PATH to NAME; --since TIME as for save
   posthero send PATH [FILE]      send the request PATH as posthero does
                                  (scripts, logins, variables); with FILE
                                  (or -), send that text instead. -e ENV
@@ -84,6 +86,7 @@ var commands = map[string]func(ctx context.Context, e *Env, args []string) error
 	"add":        add,
 	"save":       save,
 	"mkdir":      mkdir,
+	"rename":     rename,
 	"send":       sendRequest,
 	"env":        env,
 }
@@ -331,6 +334,104 @@ func mkdir(ctx context.Context, e *Env, args []string) error {
 		return err
 	}
 	fmt.Fprintf(e.Out, "made %s/\t%s\n", name, made.ID)
+	return nil
+}
+
+// rename renames a request, a folder or a collection, changing only its
+// name. Like add and mkdir, it refuses a name that is there already, so a
+// path keeps naming one thing; like save, --since refuses when someone
+// changed the request or folder in Postman after that time.
+func rename(ctx context.Context, e *Env, args []string) error {
+	since := ""
+	args, err := e.flags("rename", args, func(fs *flag.FlagSet) { fs.StringVar(&since, "since", "", "") })
+	if err != nil {
+		return err
+	}
+	if len(args) != 2 {
+		return errors.New("rename: give the path and the new name")
+	}
+	name := strings.TrimSpace(args[1])
+	if name == "" {
+		return errors.New("rename: give a new name")
+	}
+	ws, err := e.writable(ctx)
+	if err != nil {
+		return err
+	}
+	f, err := e.find(ctx, ws, args[0])
+	if err != nil {
+		return err
+	}
+	if f.item == nil {
+		return renameCollection(ctx, e, ws, f, name, since)
+	}
+	it := f.item
+	if it.Name == name {
+		fmt.Fprintln(e.Out, "no changes to save")
+		return nil
+	}
+	var parent *postman.Item
+	if len(f.parents) > 0 {
+		parent = f.parents[len(f.parents)-1]
+	}
+	for _, sibling := range *f.col.Container(parent) {
+		if sibling != it && sibling.Name == name {
+			return fmt.Errorf("rename: %s is there already (%s)", name, sibling.ID)
+		}
+	}
+	uid, ref := f.col.Info.UID, postman.Ref(it.ID, it.UID)
+	if it.Folder {
+		if since != "" && it.UpdatedAt > since {
+			return fmt.Errorf("not renamed: %s changed in Postman at %s, after %s", it.Name, it.UpdatedAt, since)
+		}
+		if err := e.API.PatchFolder(ctx, uid, ref, postman.ItemPatch{Name: &name}); err != nil {
+			return err
+		}
+		fmt.Fprintf(e.Out, "renamed %s/ to %s/\t%s\n", it.Name, name, it.ID)
+		return nil
+	}
+	conflict, err := store.CheckRequest(ctx, e.API, uid, ref, since)
+	if err != nil {
+		return err
+	}
+	if conflict != nil {
+		by := ""
+		if conflict.By != "" {
+			by = " by user " + conflict.By
+		}
+		return fmt.Errorf("not renamed: %s changed in Postman at %s%s, after %s", it.Name, conflict.At, by, since)
+	}
+	at, err := e.API.PatchRequest(ctx, uid, ref, postman.ItemPatch{Name: &name})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(e.Out, "renamed %s to %s\t%s\t%s\n", it.Name, name, it.ID, at)
+	return nil
+}
+
+// renameCollection renames the collection found, unless another collection
+// in the workspace is called that already.
+func renameCollection(ctx context.Context, e *Env, ws postman.Workspace, f found, name, since string) error {
+	if f.col.Info.Name == name {
+		fmt.Fprintln(e.Out, "no changes to save")
+		return nil
+	}
+	cols, err := e.API.Collections(ctx, ws.ID)
+	if err != nil {
+		return err
+	}
+	for _, c := range cols {
+		if c.UID != f.sum.UID && c.Name == name {
+			return fmt.Errorf("rename: %s is there already (%s)", name, c.UID)
+		}
+		if c.UID == f.sum.UID && since != "" && c.UpdatedAt > since {
+			return fmt.Errorf("not renamed: %s changed in Postman at %s, after %s", c.Name, c.UpdatedAt, since)
+		}
+	}
+	if err := e.API.PatchCollection(ctx, f.col.Info.UID, postman.CollectionPatch{Name: &name}); err != nil {
+		return err
+	}
+	fmt.Fprintf(e.Out, "renamed %s to %s\t%s\n", f.col.Info.Name, name, f.sum.UID)
 	return nil
 }
 
